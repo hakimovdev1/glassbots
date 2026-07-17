@@ -48,6 +48,10 @@ const CONFIG = {
     autoIntervalMs: 30 * 60 * 1000,  // AUTO sikllar oralig'i (30 daqiqa)
     autoFirstDelayMs: 15000,         // logindan keyin birinchi siklgacha kutish
     lowGlassThreshold: 128,          // bir yig'ishda shundan kam glass chiqsa -> fill
+    // ---- Barqarorlik (selfwork/hosting) ----
+    reconnectMaxDelayMs: 120000,     // backoff: 5s dan boshlab shu qiymatgacha oshadi
+    spawnTimeoutMs: 90000,           // shu vaqt ichida spawn bo'lmasa qayta ulanish
+    zombieTimeoutMs: 60000,          // serverdan paket kelmasa ulanish o'lik deb topiladi
 }
 const botConfig = {
     host: 'hypixel.uz',
@@ -55,6 +59,12 @@ const botConfig = {
     username: process.env.CRAFTER_USERNAME, // change username
     version: '1.18.2', // change version if needed (1.21.1 , 1.19.4 , 1.20.1)
     password: process.env.CRAFTER_PASSWORD, // change password
+}
+// Hostingda env o'zgaruvchi unutilsa bot tushunarsiz xato bilan aylanib
+// qolmasligi uchun — darhol aniq xabar bilan chiqamiz
+if (!botConfig.username || !botConfig.password) {
+    console.log('XATO: CRAFTER_USERNAME va CRAFTER_PASSWORD env o\'zgaruvchilari berilishi shart!')
+    process.exit(1)
 }
 
 // xFrom dan xTo gacha bir qator sandiq pozitsiyalari (ikkala yo'nalishda ham)
@@ -95,8 +105,11 @@ let resumeTaskAfterReconnect = null // 'craft' | 'fill' | 'auto'
 // AUTO rejim holati ham qayta ulanishlarda saqlanib qoladi
 let autoEnabled = CONFIG.autoStart
 let nextAutoRunAt = 0 // keyingi AUTO sikl vaqti (timestamp), 0 = hali belgilanmagan
+// Ketma-ket muvaffaqiyatsiz ulanishlar soni (backoff uchun); spawnda 0 ga qaytadi
+let reconnectAttempts = 0
 function createBot() {
     const bot = mineflayer.createBot(botConfig)
+    const createdAt = Date.now()
     bot.loadPlugin(pathfinder.pathfinder)
     bot.loadPlugin(craftEngine)
     let busy = false          // bir vaqtda faqat bitta katta vazifa
@@ -105,6 +118,8 @@ function createBot() {
     let loginTriggered = false
     let disconnected = false  // ulanish o'lganda darhol true bo'ladi
     let needHomeAfterDeath = false // o'limdan keyin orolga qaytish kerakligini bildiradi
+    let hasSpawned = false    // birinchi spawn bo'ldimi (spawn-timeout watchdog uchun)
+    let reconnectScheduled = false // qayta ulanish faqat BIR marta rejalashtirilsin
 
     // Ish davom ettirilishi mumkinmi? — har bir loop qadamida tekshiriladi.
     // Ulanish o'lgan zahoti bot uzun timeoutlarni kutmasdan ishni to'xtatadi.
@@ -134,8 +149,20 @@ function createBot() {
         }
         bot.pathfinder.setMovements(safeMoves)
 
-        // fallback: server "login" so'ramasa ham resume urinib ko'ramiz
-        setTimeout(() => { tryAutoResume() }, 15000)
+        hasSpawned = true
+        reconnectAttempts = 0 // muvaffaqiyatli ulandik — backoff qayta boshlanadi
+
+        // fallback: server "login" xabarini yubormasa ham (masalan sessiya
+        // saqlanib qolgan bo'lsa) login + /is go + resume baribir bajariladi
+        setTimeout(() => {
+            if (disconnected) return
+            if (!loginTriggered) {
+                loginTriggered = true
+                startLogin()
+            } else {
+                tryAutoResume()
+            }
+        }, 15000)
     })
 
     // ==================================================================
@@ -320,12 +347,29 @@ function createBot() {
     }
 
     // Katta vazifalarni bitta joydan boshqarish: bir vaqtda faqat bittasi,
-    // currentTask esa resume va whisper javoblari uchun ishlatiladi
+    // currentTask esa resume va whisper javoblari uchun ishlatiladi.
+    // Vazifadagi KUTILMAGAN xato shu yerda tutiladi — bot yiqilmaydi,
+    // keyingi AUTO sikl odatdagidek davom etadi.
     async function runTask(name, fn) {
         if (busy) return logger('Bot band!', 'muhim')
         busy = true
         currentTask = name
-        try { await fn() } finally { busy = false; currentTask = null }
+        try {
+            await fn()
+        } catch (err) {
+            logger(`"${name}" vazifasida kutilmagan xato: ${err?.stack || err}`, 'muhim')
+            // toza holatga qaytish: harakatni to'xtatib orolga qaytamiz
+            if (!disconnected) {
+                try {
+                    bot.pathfinder.stop()
+                    bot.clearControlStates()
+                    bot.chat('/is go')
+                } catch (e) { /* ignore */ }
+            }
+        } finally {
+            busy = false
+            currentTask = null
+        }
     }
 
     // Qayta ulanishdan keyin uzilib qolgan vazifani avtomatik davom ettiradi
@@ -1030,6 +1074,30 @@ function createBot() {
     }, 5000)
 
     // ==================================================================
+    // ================= ULANISH WATCHDOG (selfwork) ====================
+    // ==================================================================
+
+    // Serverdan kelgan HAR QANDAY paket faollik hisoblanadi
+    let lastActivity = Date.now()
+    bot._client.on('packet', () => { lastActivity = Date.now() })
+
+    // Ikki holatni ushlaydi: (1) ulanib olib spawn bo'lmay qotib qolish,
+    // (2) "zombi" ulanish — socket ochiq, lekin server hech narsa yubormayapti.
+    // Ikkalasida ham bot.end() chaqiriladi -> 'end' handler qayta ulaydi.
+    const watchdogTimer = setInterval(() => {
+        if (disconnected) return
+        if (!hasSpawned && Date.now() - createdAt > CONFIG.spawnTimeoutMs) {
+            logger('Watchdog: spawn bo\'lmadi — ulanish qaytadan boshlanadi', 'muhim')
+            try { bot.end('spawn timeout') } catch (e) { /* ignore */ }
+            return
+        }
+        if (Date.now() - lastActivity > CONFIG.zombieTimeoutMs) {
+            logger('Watchdog: server javob bermayapti (zombi ulanish) — qayta ulanamiz', 'muhim')
+            try { bot.end('zombie timeout') } catch (e) { /* ignore */ }
+        }
+    }, 10000)
+
+    // ==================================================================
     // ======================= EVENT HANDLERLAR =========================
     // ==================================================================
 
@@ -1058,16 +1126,21 @@ function createBot() {
     bot.on('error', err => {
         logger(`Socket xato: ${err.message}`, 'muhim')
     })
-    // Uzilib qolsa avtomatik qayta ulanadi; ish holati saqlanadi
+    // Uzilib qolsa avtomatik qayta ulanadi; ish holati saqlanadi.
+    // Qayta ulanish backoff bilan (5s -> 10s -> ... -> reconnectMaxDelayMs) —
+    // server uzoq o'chirilganda ham bot urinaverib, yonishi bilan kiradi.
     bot.on('end', reason => {
         disconnected = true
         clearInterval(autoTimer)
+        clearInterval(watchdogTimer)
         if (busy && currentTask && !stopRequested) {
             resumeTaskAfterReconnect = currentTask
             logger(`Ish (${currentTask}) uzilib qoldi — qayta ulangach AVTOMATIK davom ettiriladi`, 'muhim')
         }
-        logger(`Ulanish uzildi (${reason}) — ${CONFIG.reconnectDelayMs / 1000}s dan keyin qayta ulanamiz...`, 'muhim')
-        setTimeout(createBot, CONFIG.reconnectDelayMs)
+        if (reconnectScheduled) return // ikki marta rejalashtirilmasin
+        reconnectScheduled = true
+        logger(`Ulanish uzildi (${reason})`, 'muhim')
+        scheduleReconnect()
     })
     // Owner ga javob: konsolga ham, o'yin ichiga whisper bilan ham boradi —
     // hostingda bot loglarini ochmasdan holatni bilish uchun
@@ -1149,5 +1222,41 @@ function createBot() {
     return bot
 }
 
+// ======================================================================
+// ================ SELFWORK: JARAYON DARAJASIDAGI HIMOYA ===============
+// ======================================================================
 
-createBot()
+// Kutilmagan xatolar (event handler ichidagi throw, unutilgan promise
+// rejection va h.k.) jarayonni O'LDIRMAYDI — log qilinadi va bot
+// watchdog/reconnect tizimi orqali o'zini o'zi tiklaydi.
+process.on('uncaughtException', err => {
+    console.log(`!!! Uncaught exception: ${err?.stack || err}`)
+})
+process.on('unhandledRejection', err => {
+    console.log(`!!! Unhandled rejection: ${err?.stack || err}`)
+})
+
+// Qayta ulanish backoff bilan: 5s, 10s, 20s, ... reconnectMaxDelayMs gacha.
+// Muvaffaqiyatli spawn bo'lishi bilan hisoblagich 0 ga qaytadi.
+function scheduleReconnect() {
+    const delay = Math.min(
+        CONFIG.reconnectDelayMs * 2 ** reconnectAttempts,
+        CONFIG.reconnectMaxDelayMs
+    )
+    reconnectAttempts++
+    console.log(`${Math.round(delay / 1000)}s dan keyin qayta ulanamiz (urinish ${reconnectAttempts})...`)
+    setTimeout(startBot, delay)
+}
+
+// createBot ning o'zi xato tashlasa ham (masalan DNS/socket yaratish xatosi)
+// jarayon yiqilmaydi — backoff bilan qayta uriniladi
+function startBot() {
+    try {
+        createBot()
+    } catch (err) {
+        console.log(`Bot yaratishda xato: ${err?.message || err}`)
+        scheduleReconnect()
+    }
+}
+
+startBot()
