@@ -11,7 +11,7 @@ const CONFIG = {
     owners: ['HAKIMOV', 'IveNeS_UZ'],
     // Log darajasi: 'logsiz' | 'muhim' | 'barchasi'
     // ("loglevel <daraja>" whisper buyrug'i bilan ishlash paytida o'zgartirsa bo'ladi)
-    loggerType: 'muhim',
+    loggerType: process.env.FILLER_LOGGER_TYPE || 'muhim',
     // === Island filler sozlamalari ===
     // O'z orolda FAQAT shu quti (box) ichidagi sandiqlar ochiladi.
     // Qiymat shared.js dan — crafter.js bilan avtomatik bir xil:

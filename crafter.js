@@ -19,7 +19,7 @@ const CONFIG = {
     owners: ['HAKIMOV', 'IveNeS_UZ'],
     // Log darajasi: 'logsiz' | 'muhim' | 'barchasi'
     // ("loglevel <daraja>" whisper buyrug'i bilan ishlash paytida o'zgartirsa bo'ladi)
-    loggerType: 'muhim',
+    loggerType: process.env.CRAFTER_LOGGER_TYPE || 'muhim',
     // Tayyor glass_bottle lar FAQAT shu quti ichidagi sandiqlarga solinadi.
     // Qiymat shared.js dan — glassFiller.js bilan avtomatik bir xil:
     homeChestArea: HOME_CHEST_AREA,
@@ -209,6 +209,46 @@ function createBot() {
         }
     }
 
+    // Sandiqni ISHONCHLI ochish — "o'zi sandiq ochildimi, men uni ichidamanmi?"
+    // tekshiruvi bilan:
+    //  1) ochishdan OLDIN qolib ketgan eski oyna yopiladi (shop yoki avvalgi
+    //     xatodan ochiq qolgan oyna yangi so'rovni bloklab, windowOpen timeout
+    //     va inventar desyncga sabab bo'ladi)
+    //  2) ochilgach oyna haqiqatan botning FAOL oynasi ekani tasdiqlanadi
+    //  3) tasdiq o'tmasa oyna yopilib, qisqa kutish bilan qayta uriniladi
+    // null qaytsa — sandiq haqiqatan ochilmadi, chaqiruvchi keyingisiga o'tadi.
+    async function openChestVerified(block, attempts = 2) {
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            if (aborted()) return null
+
+            // eski oyna qolib ketgan bo'lsa avval uni yopamiz — server yangi
+            // oynani shusiz ochmasligi yoki noto'g'ri holat yuborishi mumkin
+            if (bot.currentWindow) {
+                try { await bot.closeWindow(bot.currentWindow) } catch (e) { /* ignore */ }
+                await bot.waitForTicks(5)
+            }
+
+            let chest
+            try {
+                chest = await bot.openChest(block)
+            } catch (err) {
+                logger(`Sandiq ochilmadi (${block.position}, urinish ${attempt}/${attempts}): ${err.message}`)
+                await bot.waitForTicks(10)
+                continue
+            }
+            await sleep(CONFIG.chestOpenDelayMs)
+
+            // tekshiruv: ochilgan oyna hozir ham faol oynami? (kechikkan yoki
+            // almashib ketgan oyna bilan ishlash desync xatolariga olib keladi)
+            if (bot.currentWindow === chest) return chest
+
+            logger(`Sandiq oynasi tasdiqlanmadi (${block.position}, urinish ${attempt}/${attempts}) — qayta ochiladi`)
+            await safeClose(chest)
+            await bot.waitForTicks(10)
+        }
+        return null
+    }
+
     // Pathfinding timeout bilan — osilib qolmaydi; ulanish o'lsa darhol chiqadi.
     // Watchdog goto tugashi bilan o'chadi — keyingi pathfindingga xalaqit bermaydi.
     async function gotoGoal(goal) {
@@ -280,6 +320,14 @@ function createBot() {
             } catch (err) {
                 const message = err.message || String(err)
                 if (message.includes('full')) break
+                // "Can't find ... in slots" — oyna desync bo'lgan (inventarda
+                // item bor, lekin ochiq oyna uni ko'rmayapti). Shu oynada qayta
+                // urinish foydasiz — sandiq yopilib QAYTA OCHILISHI kerak,
+                // buni chaqiruvchi tomondagi reopen logikasi bajaradi.
+                if (message.includes("Can't find")) {
+                    logger(`Deposit desync: ${message} — sandiq qayta ochilishi kerak`)
+                    break
+                }
                 failStreak++
                 if (failStreak >= CONFIG.depositRetries) {
                     logger(`Deposit xato (qayta urinishlar tugadi): ${message}`)
@@ -297,14 +345,8 @@ function createBot() {
     async function openAndDepositAll(block, itemName) {
         let totalDeposited = 0
         for (let attempt = 0; attempt < 2; attempt++) {
-            let chest
-            try {
-                chest = await bot.openChest(block)
-            } catch (err) {
-                logger(`Sandiqni ochib bo'lmadi: ${err.message}`)
-                return { deposited: totalDeposited, chestFull: false }
-            }
-            await sleep(CONFIG.chestOpenDelayMs)
+            const chest = await openChestVerified(block)
+            if (!chest) return { deposited: totalDeposited, chestFull: false }
 
             totalDeposited += await depositToChest(chest, itemName)
             const chestFull = chestFreeSpaceFor(chest, itemName) <= 0
@@ -452,14 +494,8 @@ function createBot() {
             const pos = itemName === 'sand' ? base : base.offset(0, -1, 0)
             const block = bot.blockAt(pos)
             if (!block || block.name !== 'chest') continue
-            let chest
-            try {
-                chest = await bot.openChest(block)
-            } catch (err) {
-                logger(`Sandiq ochilmadi (${pos}): ${err.message}`)
-                continue
-            }
-            await sleep(CONFIG.chestOpenDelayMs)
+            const chest = await openChestVerified(block)
+            if (!chest) continue
             await depositToChest(chest, itemName)
             await safeClose(chest)
         }
@@ -485,14 +521,8 @@ function createBot() {
 
             const block = bot.blockAt(gc.pos)
             if (!block || !block.name.includes('chest')) continue
-            let chest
-            try {
-                chest = await bot.openChest(block)
-            } catch (err) {
-                logger(`Glass sandiq ochilmadi (${gc.pos}): ${err.message}`)
-                continue
-            }
-            await sleep(CONFIG.chestOpenDelayMs)
+            const chest = await openChestVerified(block)
+            if (!chest) continue
             await depositToChest(chest, 'glass')
             await safeClose(chest)
         }
@@ -558,14 +588,8 @@ function createBot() {
                 // yuborib sinxronlikni tiklaydi
                 let space = 0
                 for (let attempt = 0; attempt < 2; attempt++) {
-                    let chest
-                    try {
-                        chest = await bot.openChest(block)
-                    } catch (err) {
-                        logger(`Sandiq ochilmadi (${pos}): ${err.message}`)
-                        break
-                    }
-                    await sleep(CONFIG.chestOpenDelayMs)
+                    const chest = await openChestVerified(block)
+                    if (!chest) break
 
                     space = chestFreeSpaceFor(chest, itemName)
                     if (space > 0 && countItem(itemName) > 0) {
@@ -813,18 +837,13 @@ function createBot() {
                     continue
                 }
 
-                try {
-                    chest = await bot.openChest(block)
-                } catch (err) {
-                    logger(`Glass sandiq ochilmadi (${gc.pos}): ${err.message}`)
-                    await bot.waitForTicks(10)
-                }
+                // tashqi attempt sikli qayta uradi — bu yerda 1 urinish yetarli
+                chest = await openChestVerified(block, 1)
             }
             if (!chest) {
                 logger(`Glass chest ${i} (${gc.pos}) o'tkazib yuborildi!`, 'muhim')
                 continue
             }
-            await sleep(CONFIG.chestOpenDelayMs)
 
             while (true) {
                 const space = getInventorySpaceFor('glass')
@@ -844,13 +863,65 @@ function createBot() {
         return gathered
     }
 
-    // Inventardagi BARCHA glass ni glass_bottle ga craft qiladi.
+    // homeChestArea ichidagi sandiq pozitsiyalari — deterministik tartibda
+    // (chestOrder). depositBottlesHome va checkHomeChestSpace shundan foydalanadi.
+    function findHomeChests() {
+        const chestBlockIds = []
+        if (bot.registry.blocksByName.chest) chestBlockIds.push(bot.registry.blocksByName.chest.id)
+        if (bot.registry.blocksByName.trapped_chest) chestBlockIds.push(bot.registry.blocksByName.trapped_chest.id)
+
+        return bot.findBlocks({
+            matching: chestBlockIds,
+            maxDistance: CONFIG.homeChestSearchRadius,
+            count: 256,
+        })
+            .filter(p => inHomeChestArea(p))
+            .sort(chestOrder)
+    }
+
+    // Deposit sandiqlarida itemName uchun jami qancha joy borligini tekshiradi.
+    // Craft OLDIDAN chaqiriladi: joy bo'lmasa bot bekorga craft qilib, bottle
+    // inventarda qolib ketmaydi. needed ga yetishi bilan qolgan sandiqlarni
+    // ochmasdan qaytadi — "joy yetarlimi?" savoliga tez javob beradi.
+    async function checkHomeChestSpace(itemName, needed) {
+        const positions = findHomeChests()
+        if (positions.length === 0) {
+            logger('homeChestArea ichida sandiq topilmadi!', 'muhim')
+            return 0
+        }
+
+        let space = 0
+        for (const p of positions) {
+            if (aborted() || needHomeAfterDeath) break
+            if (space >= needed) break
+
+            const block = bot.blockAt(p)
+            if (!block || !block.name.includes('chest')) continue
+
+            const reached = await safeGoNear(p, CONFIG.chestReachRange)
+            if (!reached) continue
+
+            const chest = await openChestVerified(block)
+            if (!chest) continue
+            space += chestFreeSpaceFor(chest, itemName)
+            await safeClose(chest)
+        }
+        return space
+    }
+
+    // Inventardagi glass ni glass_bottle ga craft qiladi.
+    // maxAmount berilsa faqat shuncha bottle craft qilinadi (deposit
+    // sandiqlarda joy kam bo'lsa ortiqcha craft qilmaslik uchun), aks holda
+    // barcha glass ishlatiladi.
     // mineflayer-craft-engine ishlatiladi: Recipe Book protokoli orqali
     // server crafting gridni O'ZI to'ldiradi (craft_recipe_request paketi),
     // bot faqat natijani yig'ib oladi — bot.craft dan ko'p barobar tez.
     // Fast usul o'tmasa 'adaptive' rejim avtomatik safe (bot.craft) ga qaytadi.
-    async function craftBottles() {
+    async function craftBottles(maxAmount = null) {
         if (countItem('glass') < 3) return 0 // bitta craft uchun ham glass yetmaydi
+        // retsept 3 taliklarda ishlaydi — sig'maydigan qoldiq craft qilinmaydi
+        const amount = maxAmount == null ? 'all' : Math.floor(maxAmount / 3) * 3
+        if (amount !== 'all' && amount < 3) return 0
 
         // crafting table ni topamiz va yoniga boramiz
         const tableDef = bot.registry.blocksByName.crafting_table
@@ -880,7 +951,7 @@ function createBot() {
             const result = await Promise.race([
                 bot.craftEngine.craft({
                     item: 'glass_bottle',
-                    amount: 'all', // inventardagi barcha glass tugaguncha
+                    amount, // 'all' = barcha glass, raqam = sandiqlarga sig'adigancha
                     table: [table.position.x, table.position.y, table.position.z],
                     mode: CONFIG.craftMode,
                     windowTimeoutMs: CONFIG.craftWindowTimeoutMs,
@@ -906,18 +977,7 @@ function createBot() {
     async function depositBottlesHome() {
         if (countItem('glass_bottle') === 0) return 0
 
-        const chestBlockIds = []
-        if (bot.registry.blocksByName.chest) chestBlockIds.push(bot.registry.blocksByName.chest.id)
-        if (bot.registry.blocksByName.trapped_chest) chestBlockIds.push(bot.registry.blocksByName.trapped_chest.id)
-
-        const positions = bot.findBlocks({
-            matching: chestBlockIds,
-            maxDistance: CONFIG.homeChestSearchRadius,
-            count: 256,
-        })
-            .filter(p => inHomeChestArea(p))
-            .sort(chestOrder)
-
+        const positions = findHomeChests()
         if (positions.length === 0) {
             logger('homeChestArea ichida sandiq topilmadi!', 'muhim')
             return 0
@@ -988,8 +1048,27 @@ function createBot() {
             // qo'ldagi glassni craft qilib bo'lib chiqamiz (oxirgi sikl)
             if (got < CONFIG.lowGlassThreshold) lowGlass = true
 
-            // 2. craft
-            const made = await craftBottles()
+            // 2. deposit sandiqlarda joy bormi? — joy bo'lmasa CRAFT QILINMAYDI,
+            //    aks holda bottle inventarda qolib xatoliklarga sabab bo'ladi.
+            //    3 glass -> 3 bottle, ya'ni kutilayotgan bottle = glass soni.
+            const expected = countItem('glass')
+            const space = await checkHomeChestSpace('glass_bottle', expected)
+            if (disconnected) break
+            if (needHomeAfterDeath) { await recoverAfterDeath(); continue }
+            if (aborted()) break
+            if (space < 3) {
+                logger('Deposit sandiqlarda joy yo\'q — craft qilinmasdan craft loop yakunlandi', 'muhim')
+                break
+            }
+            // joy hammasi uchun yetmaydi — faqat sig'adigancha craft qilamiz,
+            // deposit dan keyin loop yakunlanadi
+            const spaceTight = space < expected
+            if (spaceTight) {
+                logger(`Deposit sandiqlarda faqat ${space} bottle ga joy qoldi — shunchagina craft qilinadi`, 'muhim')
+            }
+
+            // 3. craft
+            const made = await craftBottles(spaceTight ? space : null)
             if (disconnected) break
             if (needHomeAfterDeath) { await recoverAfterDeath(); continue }
             if (made === 0) {
@@ -997,7 +1076,7 @@ function createBot() {
                 break
             }
 
-            // 3. deposit
+            // 4. deposit
             const dep = await depositBottlesHome()
             totalBottles += dep
             if (disconnected) break
@@ -1011,6 +1090,11 @@ function createBot() {
             const cycleSec = ((Date.now() - cycleStart) / 1000).toFixed(1)
             const perMin = Math.round(totalBottles / ((Date.now() - startTime) / 60000))
             logger(`Cycle ${cycle}: +${dep} bottle (${cycleSec}s) | tezlik: ~${perMin} bottle/min`, 'muhim')
+
+            if (spaceTight) {
+                logger('Deposit sandiqlar to\'lay deb qoldi — craft loop yakunlandi', 'muhim')
+                break
+            }
 
             if (lowGlass) {
                 logger(`Glass kam yig'ildi (<${CONFIG.lowGlassThreshold}) — craft loop yakunlandi`, 'muhim')
