@@ -879,10 +879,69 @@ function createBot() {
             .sort(chestOrder)
     }
 
+    // pos dagi sandiqqa borib ochadi va itemName uchun qancha joy borligini
+    // qaytaradi. -1 = sandiqqa yetib/ochib bo'lmadi (joy noma'lum).
+    async function probeChestSpace(pos, itemName) {
+        const block = bot.blockAt(pos)
+        if (!block || !block.name.includes('chest')) return -1
+
+        const reached = await safeGoNear(pos, CONFIG.chestReachRange)
+        if (!reached) return -1
+
+        const chest = await openChestVerified(block)
+        if (!chest) return -1
+        const space = chestFreeSpaceFor(chest, itemName)
+        await safeClose(chest)
+        return space
+    }
+
+    // Eng OLDINGI "itemName uchun joyi bor" sandiqni BINARY SEARCH bilan
+    // topadi — barcha to'la sandiqlarni bitta-bitta ochib chiqmaydi.
+    // MUHIM: "bo'sh sandiq" emas, "joy bor sandiq" qidiriladi (chala to'lgan
+    // sandiq ham hisobga olinadi) — sandiqlarda ochiq joy qolib ketmaydi.
+    // Sandiqlar har doim boshidan to'ldirilgani uchun ro'yxat taxminan
+    // [to'la ... to'la, joy bor ... joy bor] ko'rinishida — shunga tayanadi.
+    // Qaytaradi: { idx, space } yoki null (hech qayerda joy topilmadi).
+    async function findFirstChestWithSpace(positions, itemName) {
+        let probes = 1
+        // 1-sandiqda joy bo'lsa qidiruvning o'zi kerak emas
+        const firstSpace = await probeChestSpace(positions[0], itemName)
+        if (firstSpace > 0) return { idx: 0, space: firstSpace }
+        if (positions.length === 1) return null
+
+        // oxirgi sandiqda ham joy bo'lmasa — hammasi to'la (2 ta ochishda ma'lum)
+        const lastIdx = positions.length - 1
+        probes++
+        const lastSpace = await probeChestSpace(positions[lastIdx], itemName)
+        if (lastSpace <= 0) return null
+
+        // invariant: lo — to'la (yoki ochilmadi), hi — joy bor.
+        // O'rtasini ochib chegarani toraytiramiz: o'rtada joy bo'lsa undan
+        // OLDINROQ qidiramiz, to'la bo'lsa keyinroq — eng oldingi topiladi.
+        let lo = 0
+        let hi = lastIdx
+        let hiSpace = lastSpace
+        while (hi - lo > 1) {
+            if (aborted() || needHomeAfterDeath) return { idx: hi, space: hiSpace }
+            const mid = (lo + hi) >> 1
+            probes++
+            const s = await probeChestSpace(positions[mid], itemName)
+            if (s > 0) {
+                hi = mid
+                hiSpace = s
+            } else {
+                lo = mid
+            }
+        }
+        logger(`Birinchi joyli sandiq: #${hi + 1}/${positions.length} (${probes} ta ochish bilan topildi)`)
+        return { idx: hi, space: hiSpace }
+    }
+
     // Deposit sandiqlarida itemName uchun jami qancha joy borligini tekshiradi.
     // Craft OLDIDAN chaqiriladi: joy bo'lmasa bot bekorga craft qilib, bottle
-    // inventarda qolib ketmaydi. needed ga yetishi bilan qolgan sandiqlarni
-    // ochmasdan qaytadi — "joy yetarlimi?" savoliga tez javob beradi.
+    // inventarda qolib ketmaydi. Birinchi joyli sandiq binary search bilan
+    // topiladi, keyin needed ga yetguncha keyingilari qo'shib boriladi —
+    // yetishi bilan qolgan sandiqlar ochilmaydi.
     async function checkHomeChestSpace(itemName, needed) {
         const positions = findHomeChests()
         if (positions.length === 0) {
@@ -890,21 +949,14 @@ function createBot() {
             return 0
         }
 
-        let space = 0
-        for (const p of positions) {
+        const first = await findFirstChestWithSpace(positions, itemName)
+        if (!first) return 0
+
+        let space = first.space
+        for (let i = first.idx + 1; i < positions.length && space < needed; i++) {
             if (aborted() || needHomeAfterDeath) break
-            if (space >= needed) break
-
-            const block = bot.blockAt(p)
-            if (!block || !block.name.includes('chest')) continue
-
-            const reached = await safeGoNear(p, CONFIG.chestReachRange)
-            if (!reached) continue
-
-            const chest = await openChestVerified(block)
-            if (!chest) continue
-            space += chestFreeSpaceFor(chest, itemName)
-            await safeClose(chest)
+            const s = await probeChestSpace(positions[i], itemName)
+            if (s > 0) space += s
         }
         return space
     }
@@ -972,22 +1024,14 @@ function createBot() {
         }
     }
 
-    // Tayyor bottle larni homeChestArea sandiqlariga soladi.
-    // Sandiqlar deterministik tartibda (chestOrder) — har doim bir boshidan.
-    async function depositBottlesHome() {
-        if (countItem('glass_bottle') === 0) return 0
-
-        const positions = findHomeChests()
-        if (positions.length === 0) {
-            logger('homeChestArea ichida sandiq topilmadi!', 'muhim')
-            return 0
-        }
-
+    // positions[startIdx..endIdx) sandiqlariga bottle larni ketma-ket soladi
+    async function depositBottlesRange(positions, startIdx, endIdx = positions.length) {
         let total = 0
-        for (const p of positions) {
+        for (let i = startIdx; i < endIdx; i++) {
             if (aborted() || needHomeAfterDeath) break
             if (countItem('glass_bottle') === 0) break
 
+            const p = positions[i]
             const block = bot.blockAt(p)
             if (!block || !block.name.includes('chest')) continue
 
@@ -1002,6 +1046,33 @@ function createBot() {
                 total += deposited
                 logger(`(${p.x}, ${p.y}, ${p.z}): +${deposited} bottle`)
             }
+        }
+        return total
+    }
+
+    // Tayyor bottle larni homeChestArea sandiqlariga soladi.
+    // Sandiqlar deterministik tartibda (chestOrder); to'la sandiqlarni
+    // bitta-bitta ochib chiqmasdan birinchi joyli sandiq binary search
+    // bilan topiladi va deposit o'sha yerdan boshlanadi.
+    async function depositBottlesHome() {
+        if (countItem('glass_bottle') === 0) return 0
+
+        const positions = findHomeChests()
+        if (positions.length === 0) {
+            logger('homeChestArea ichida sandiq topilmadi!', 'muhim')
+            return 0
+        }
+
+        const first = await findFirstChestWithSpace(positions, 'glass_bottle')
+        let total = 0
+        if (first) total += await depositBottlesRange(positions, first.idx)
+
+        // Himoya: bottle hali ham qolgan bo'lsa binary search taxmini noto'g'ri
+        // chiqqan (sandiqlar tartibsiz bo'shagan — masalan glassFiller o'rtadan
+        // olgan). Qidiruv qamrab olmagan boshlang'ich qismni to'liq o'tamiz —
+        // sandiqlarda ochiq joy qolib ketmaydi.
+        if (countItem('glass_bottle') > 0 && !aborted() && !needHomeAfterDeath) {
+            total += await depositBottlesRange(positions, 0, first ? first.idx : positions.length)
         }
 
         return total
