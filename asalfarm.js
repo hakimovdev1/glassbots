@@ -41,7 +41,7 @@ const BOTS_CONFIG = [
     .fill()
     .map((_, i) => ({
       username: `KH_BOT_N${i + 1}`,
-      password: process.env.BOT_PASSWORD,
+      password: process.env.BOT_PASSWORD.split('_')[0],
       host: 'hypixel.uz',
       port: 25565
     }))

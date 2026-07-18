@@ -1,4 +1,5 @@
 glassFiller.state.json
 node_modules/
+logs
 package-lock.json
 .env
