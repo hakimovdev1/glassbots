@@ -7,6 +7,10 @@
 //  - warp sandiqlariga sand va coal deposit qiladi (kerak bo'lsa shopdan olib)
 // Orollarni glass_bottle bilan to'ldirish glassFiller.js botining ishi.
 // ======================================================================
+require('dotenv').config()
+// .env har doim SHU FAYL yonidan o'qiladi — hostingda qaysi papkadan ishga
+// tushirilishidan qat'i nazar CRAFTER_USERNAME/PASSWORD topiladi
+require('dotenv').config({ path: require('path').join(__dirname, '.env') })
 const mineflayer = require('mineflayer')
 const pathfinder = require('mineflayer-pathfinder')
 const craftEngine = require('mineflayer-craft-engine')
@@ -58,12 +62,12 @@ const botConfig = {
     port: 25565,
     username: process.env.CRAFTER_USERNAME, // change username
     version: '1.18.2', // change version if needed (1.21.1 , 1.19.4 , 1.20.1)
-    password: process.env.CRAFTER_PASSWORD, // change password
+    password: process.env.BOT_PASSWORD, // change password
 }
 // Hostingda env o'zgaruvchi unutilsa bot tushunarsiz xato bilan aylanib
 // qolmasligi uchun — darhol aniq xabar bilan chiqamiz
 if (!botConfig.username || !botConfig.password) {
-    console.log('XATO: CRAFTER_USERNAME va CRAFTER_PASSWORD env o\'zgaruvchilari berilishi shart!')
+    console.log('XATO: CRAFTER_USERNAME va BOT_PASSWORD env o\'zgaruvchilari berilishi shart!')
     process.exit(1)
 }
 
@@ -120,6 +124,11 @@ function createBot() {
     let needHomeAfterDeath = false // o'limdan keyin orolga qaytish kerakligini bildiradi
     let hasSpawned = false    // birinchi spawn bo'ldimi (spawn-timeout watchdog uchun)
     let reconnectScheduled = false // qayta ulanish faqat BIR marta rejalashtirilsin
+    // Ish boshlashga tayyorlik vaqti: login + /is go dan KEYIN belgilanadi.
+    // nextAutoRunAt reconnectlarda saqlanib qolgani uchun bu darvoza bo'lmasa
+    // auto sikl qayta ulanishda hali login qilinmagan botda boshlanib ketadi.
+    let workReadyAt = 0
+    const workReady = () => workReadyAt !== 0 && Date.now() >= workReadyAt
 
     // Ish davom ettirilishi mumkinmi? — har bir loop qadamida tekshiriladi.
     // Ulanish o'lgan zahoti bot uzun timeoutlarni kutmasdan ishni to'xtatadi.
@@ -282,61 +291,101 @@ function createBot() {
         }
     }
 
-    // Xavfsiz withdraw: "full" xatolarida miqdorni ikkiga bo'lib qayta uradi
-    async function withdrawSafely(chest, item, amount) {
-        let toWithdraw = Math.min(amount, item.count)
-        while (toWithdraw > 0) {
+    // Ochiq sandiqdan itemName ni inventarga imkon boricha oladi.
+    // Har bir sandiq stacki SHIFT-CLICK (mode 1) bilan BIR klikda o'tadi;
+    // inventarga sig'magan qoldiqni serverning o'zi sandiqda qoldiradi.
+    // chest.withdraw() ISHLATILMAYDI — inventar to'lishiga oz qolganda u
+    // itemlarni right-click bilan BITTALAB olar edi (deposit bilan bir xil
+    // kutubxona kamchiligi).
+    async function withdrawFromChest(chest, itemName) {
+        let withdrawn = 0
+        let failStreak = 0
+        while (!aborted()) {
+            if (getInventorySpaceFor(itemName) <= 0) break
+            // sandiq (container) qismidan itemli birinchi slot
+            let slot = null
+            for (let i = 0; i < chest.inventoryStart; i++) {
+                const s = chest.slots[i]
+                if (s && s.name === itemName) { slot = i; break }
+            }
+            if (slot === null) break
+
+            const before = windowInvCount(chest, itemName)
             try {
-                await chest.withdraw(item.type, item.metadata, toWithdraw)
-                return toWithdraw
+                await bot.clickWindow(slot, 0, 1) // mode 1 = shift-click: butun stack
             } catch (err) {
-                const message = err.message || String(err)
-                if (message.includes('full') || message.includes('Unable to withdraw')) {
-                    toWithdraw = Math.floor(toWithdraw / 2)
-                    continue
-                }
-                logger(`Withdraw xato: ${message}`)
-                return 0
+                logger(`Withdraw (shift-click) xato: ${err.message || err}`)
+                break
+            }
+            await bot.waitForTicks(1)
+
+            const gained = windowInvCount(chest, itemName) - before
+            if (gained > 0) {
+                withdrawn += gained
+                failStreak = 0
+            } else if (++failStreak >= CONFIG.depositRetries) {
+                logger(`Withdraw desync (${itemName}) — sandiq qayta ochilishi kerak`)
+                break
+            } else {
+                // server tuzatish paketlarini kutib qayta uramiz
+                await bot.waitForTicks(5)
             }
         }
-        return 0
+        return withdrawn
     }
 
-    // Ochiq sandiqqa itemName ni imkon boricha soladi (desync da qayta uradi)
+    // Ochiq oynaning INVENTAR qismidagi itemName miqdori (oyna modelidan —
+    // deposit tekshiruvi klik qilingan oynaning o'zi bilan bir manbada bo'lsin)
+    function windowInvCount(chestWindow, itemName) {
+        let n = 0
+        for (let i = chestWindow.inventoryStart; i < chestWindow.inventoryEnd; i++) {
+            const s = chestWindow.slots[i]
+            if (s && s.name === itemName) n += s.count
+        }
+        return n
+    }
+
+    // Ochiq sandiqqa itemName ni imkon boricha soladi.
+    // Har bir inventar stacki SHIFT-CLICK (mode 1) bilan BIR klikda o'tadi:
+    // serverning o'zi stackni sandiqdagi chala stacklar va bo'sh joylarga
+    // taqsimlaydi. chest.deposit() ISHLATILMAYDI — u miqdor to'liq stackka
+    // to'g'ri kelmaganda itemlarni right-click bilan BITTALAB tashlab, har
+    // bir dona uchun alohida paket yuborar edi (juda sekin).
     async function depositToChest(chest, itemName) {
         let deposited = 0
         let failStreak = 0
-        while (true) {
-            const need = chestFreeSpaceFor(chest, itemName)
-            if (need <= 0) break
-            const stacks = bot.inventory.items().filter(i => i.name === itemName)
-            if (stacks.length === 0) break
-            const item = stacks[0]
-            const amount = Math.min(item.count, need)
+        while (!aborted()) {
+            if (chestFreeSpaceFor(chest, itemName) <= 0) break
+            // oynaning inventar qismidan itemli birinchi slot
+            let slot = null
+            for (let i = chest.inventoryStart; i < chest.inventoryEnd; i++) {
+                const s = chest.slots[i]
+                if (s && s.name === itemName) { slot = i; break }
+            }
+            if (slot === null) break
+
+            const before = windowInvCount(chest, itemName)
             try {
-                await chest.deposit(item.type, item.metadata, amount)
-                deposited += amount
-                failStreak = 0
+                await bot.clickWindow(slot, 0, 1) // mode 1 = shift-click: butun stack
             } catch (err) {
-                const message = err.message || String(err)
-                if (message.includes('full')) break
-                // "Can't find ... in slots" — oyna desync bo'lgan (inventarda
-                // item bor, lekin ochiq oyna uni ko'rmayapti). Shu oynada qayta
-                // urinish foydasiz — sandiq yopilib QAYTA OCHILISHI kerak,
-                // buni chaqiruvchi tomondagi reopen logikasi bajaradi.
-                if (message.includes("Can't find")) {
-                    logger(`Deposit desync: ${message} — sandiq qayta ochilishi kerak`)
-                    break
-                }
-                failStreak++
-                if (failStreak >= CONFIG.depositRetries) {
-                    logger(`Deposit xato (qayta urinishlar tugadi): ${message}`)
-                    break
-                }
-                // inventar sinxronlanishini kutib qayta uramiz
-                await bot.waitForTicks(5)
+                logger(`Deposit (shift-click) xato: ${err.message || err}`)
+                break
             }
             await bot.waitForTicks(1)
+
+            const moved = before - windowInvCount(chest, itemName)
+            if (moved > 0) {
+                deposited += moved
+                failStreak = 0
+            } else if (++failStreak >= CONFIG.depositRetries) {
+                // klik o'tmayapti — oyna desync bo'lgan: sandiq yopilib QAYTA
+                // OCHILISHI kerak, buni chaqiruvchi tomondagi reopen bajaradi
+                logger(`Deposit desync (${itemName}) — sandiq qayta ochilishi kerak`)
+                break
+            } else {
+                // server tuzatish paketlarini kutib qayta uramiz
+                await bot.waitForTicks(5)
+            }
         }
         return deposited
     }
@@ -365,6 +414,9 @@ function createBot() {
         bot.chat(`/login ${botConfig.password}`)
         await sleep(500)
         bot.chat('/is go')
+        // /is go teleporti tugashiga vaqt beramiz — shundan keyin auto sikl
+        // va whisper vazifalari ishga tushishi mumkin
+        workReadyAt = Date.now() + 3000
         // uzilishdan oldin ish bo'lgan bo'lsa — davom ettiramiz
         tryAutoResume()
     }
@@ -531,6 +583,11 @@ function createBot() {
     async function fillAllWarps() {
         stopRequested = false // avvalgi "stop" flagi yangi ishga xalaqit bermasin
 
+        // Bot ish orasida (bo'sh turganda) o'lgan bo'lsa — avval orolga
+        // qaytamiz, aks holda quyidagi stash o'limdan keyingi flag tufayli
+        // indamay o'tkazib yuborilardi
+        await recoverAfterDeath()
+
         // Shop xariddan oldin inventarni bo'shatamiz: glass o'z sandiqlariga
         // ketadi (sand/coal fill jarayonining o'ziga kerak — qoladi)
         await stashInventory(['sand', 'coal'])
@@ -658,10 +715,14 @@ function createBot() {
                 resolve(result)
             }
 
-            // klikdan keyin inventar soni o'zgarishini kutadi (maks ~8 tick)
+            // klikdan keyin inventar soni o'zgarishini kutadi (maks ~8 tick).
+            // sleep ishlatiladi, waitForTicks EMAS: ulanish uzilsa physics tick
+            // to'xtaydi va waitForTicks hech qachon resolve bo'lmay, buyFromShop
+            // promise'i (va uni kutayotgan fill vazifasi) abadiy osilib qolardi
             const waitGain = async (prev) => {
                 for (let t = 0; t < 8; t++) {
-                    await bot.waitForTicks(1)
+                    if (disconnected) return 0
+                    await sleep(50)
                     if (countItem(type) !== prev) return countItem(type) - prev
                 }
                 return 0
@@ -694,7 +755,7 @@ function createBot() {
 
                     let clickMode = 1 // 1 = shift-click (64 ta), 0 = oddiy klik
                     let noProgress = 0
-                    await bot.waitForTicks(1)
+                    await sleep(50) // waitForTicks emas — uzilishda osilib qolmasin
 
                     while (!invFull && !disconnected && !stopRequested) {
                         const bought = countItem(type) - before
@@ -845,16 +906,7 @@ function createBot() {
                 continue
             }
 
-            while (true) {
-                const space = getInventorySpaceFor('glass')
-                if (space <= 0) break
-                const glassStacks = chest.containerItems().filter(it => it && it.name === 'glass')
-                if (glassStacks.length === 0) break
-                const got = await withdrawSafely(chest, glassStacks[0], Math.min(glassStacks[0].count, space))
-                if (got === 0) break
-                gathered += got
-                await bot.waitForTicks(1)
-            }
+            gathered += await withdrawFromChest(chest, 'glass')
 
             await safeClose(chest)
         }
@@ -1090,6 +1142,11 @@ function createBot() {
 
         logger('\n===== CRAFT LOOP BOSHLANDI =====', 'muhim')
 
+        // Bot ish orasida o'lgan bo'lsa — avval orolga qaytamiz, aks holda
+        // quyidagi stash va boshlang'ich deposit o'limdan keyingi flag
+        // tufayli indamay o'tkazib yuborilardi
+        await recoverAfterDeath()
+
         // Ishdan oldin inventarni bo'shatamiz: sand/coal warp sandiqlariga
         // ketadi (glass craft uchun kerak — inventarda qoladi)
         await stashInventory(['glass'])
@@ -1216,6 +1273,9 @@ function createBot() {
     // daqiqadan cho'zilib ketsa, keyingisi tugashi bilan darhol boshlanadi.
     const autoTimer = setInterval(async () => {
         if (disconnected || !autoEnabled || busy || !bot.entity) return
+        // login + /is go tugamaguncha ish boshlanmaydi (reconnectdan keyin
+        // nextAutoRunAt muddati o'tgan bo'lsa ham)
+        if (!workReady()) return
         if (nextAutoRunAt === 0) {
             // birinchi ishga tushish — login va /is go uchun ozgina kutamiz
             nextAutoRunAt = Date.now() + CONFIG.autoFirstDelayMs
@@ -1307,7 +1367,12 @@ function createBot() {
     bot.on('whisper', async (user, msg) => {
         if (!CONFIG.owners.includes(user)) return
 
-        if (msg === 'drop') return drop()
+        // drop ish paytida taqiqlanadi — craft/deposit o'rtasida itemlarni
+        // tashlab yuborib jarayonni buzmasligi uchun
+        if (msg === 'drop') {
+            if (busy) return reply(user, `Bot band (${currentTask})! Avval "stop" yuboring`)
+            return drop()
+        }
         if (msg === 'stop') {
             stopRequested = true
             resumeTaskAfterReconnect = null // auto-resume ham bekor qilinadi
@@ -1316,12 +1381,14 @@ function createBot() {
         }
         if (msg === 'fill') {
             if (busy) return reply(user, `Bot band (${currentTask})!`)
+            if (!workReady()) return reply(user, 'Bot hali tayyor emas (login/orolga qaytish kutilmoqda)')
             await runTask('fill', fillAllWarps)
             return
         }
         // craft (yoki eski nomi go) — glass -> bottle -> deposit sikli
         if (msg === 'craft' || msg === 'go') {
             if (busy) return reply(user, `Bot band (${currentTask})!`)
+            if (!workReady()) return reply(user, 'Bot hali tayyor emas (login/orolga qaytish kutilmoqda)')
             await runTask('craft', craftLoop)
             return
         }
@@ -1340,6 +1407,7 @@ function createBot() {
         // navbatni kutmasdan AUTO siklni darhol boshlash
         if (msg === 'auto now') {
             if (busy) return reply(user, `Bot band (${currentTask})!`)
+            if (!workReady()) return reply(user, 'Bot hali tayyor emas (login/orolga qaytish kutilmoqda)')
             nextAutoRunAt = Date.now() + CONFIG.autoIntervalMs
             reply(user, 'AUTO sikl darhol boshlanmoqda')
             await runTask('auto', autoCycle)

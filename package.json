@@ -3,14 +3,18 @@
   "version": "1.0.0",
   "main": "crafter.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "asalfarm": "node asalfarm.js",
+    "crafter": "node crafter.js",
+    "filler": "node glassFiller.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "colors": "^1.4.0",
     "dotenv": "^17.4.2",
+    "minecraft-data": "^3.95.1",
     "mineflayer": "^4.37.1",
     "mineflayer-craft-engine": "^0.6.2",
     "mineflayer-pathfinder": "^2.4.5",

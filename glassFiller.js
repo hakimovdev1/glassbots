@@ -1,3 +1,6 @@
+// .env har doim SHU FAYL yonidan o'qiladi — pm2/systemd boshqa papkadan
+// ishga tushirsa ham (cwd farq qilsa ham) login ma'lumotlari topiladi
+require('dotenv').config({ path: require('path').join(__dirname, '.env') })
 const mineflayer = require('mineflayer')
 const pathfinder = require('mineflayer-pathfinder')
 // homeChestArea, sandiq tartibi, log tizimi — crafter.js bilan YAGONA manbadan (shared.js)
@@ -11,7 +14,7 @@ const CONFIG = {
     owners: ['HAKIMOV', 'IveNeS_UZ'],
     // Log darajasi: 'logsiz' | 'muhim' | 'barchasi'
     // ("loglevel <daraja>" whisper buyrug'i bilan ishlash paytida o'zgartirsa bo'ladi)
-    loggerType: process.env.FILLER_LOGGER_TYPE || 'muhim',
+    loggerType: process.env.FILLER_LOGGER_TYPE || 'barchasi',
     // === Island filler sozlamalari ===
     // O'z orolda FAQAT shu quti (box) ichidagi sandiqlar ochiladi.
     // Qiymat shared.js dan — crafter.js bilan avtomatik bir xil:
@@ -39,7 +42,13 @@ const botConfig = {
     port: 25565,
     username: process.env.FILLER_USERNAME, // change username
     version: '1.18.2', // change version if needed (1.21.1 , 1.19.4 , 1.20.1)
-    password: process.env.FILLER_PASSWORD, // change password
+    password: process.env.BOT_PASSWORD, // change password
+}
+// Hostingda env unutilsa bot tushunarsiz xato bilan aylanib qolmasligi
+// uchun — darhol aniq xabar bilan chiqamiz
+if (!botConfig.username || !botConfig.password) {
+    console.log('XATO: FILLER_USERNAME va BOT_PASSWORD env o\'zgaruvchilari berilishi shart!')
+    process.exit(1)
 }
 
 // ======================================================================
@@ -86,13 +95,19 @@ const ISLANDS = [
     },
     {
         orol_bot_username: 'asalFarm_N5',
-        endPortal: new Vec3(-2718, 81, 5882),
+        endPortal: new Vec3(-2718, 81, -5882),
         deposit_chests: [
-            // DIQQAT: oldin z manfiy (-5873/-5887) yozilgan edi — portal z=5882 dan
-            // 11 ming blok uzoqda bo'lardi. Belgisi xato deb hisoblab to'g'irlandi,
-            // o'yinda tekshirib tasdiqlang!
-            new Vec3(-2709, 95, 5873),
-            new Vec3(-2709, 95, 5887)
+            new Vec3(-2709, 95, -5873),
+            new Vec3(-2709, 95, -5887)
+        ],
+        last_full_deposit_date: null,
+    },
+    {
+        orol_bot_username: 'asalFarm_N6',
+        endPortal: new Vec3(4832, 81, -5882),
+        deposit_chests: [
+            new Vec3(4840, 95, -5877),
+            new Vec3(4840, 95, -5887)
         ],
         last_full_deposit_date: null,
     },
@@ -441,6 +456,20 @@ function createBot() {
         return space
     }
 
+    // Ochiq oynaning INVENTAR qismidagi itemName miqdori.
+    // MUHIM: oyna ochiq turganda countBottles() (bot.inventory) shift-click
+    // natijalarini KO'RMAYDI — lokal o'zgarishlar faqat oynaning o'zida
+    // aks etadi, bot.inventory oyna yopilib server resync kelgach yangilanadi.
+    // Shuning uchun oyna ichidagi o'lchovlar FAQAT shu funksiya bilan qilinadi.
+    function windowInvCount(chestWindow, itemName) {
+        let n = 0
+        for (let i = chestWindow.inventoryStart; i < chestWindow.inventoryEnd; i++) {
+            const s = chestWindow.slots[i]
+            if (s && s.name === itemName) n += s.count
+        }
+        return n
+    }
+
     // Sandiqqa inventorydagi barcha glass_bottle larni SHIFT-CLICK bilan soladi.
     //
     // Nega shift-click: deposit sandiqlar ostida HOPPER bor — u itemlarni doimiy
@@ -451,6 +480,9 @@ function createBot() {
     // hopper unga xalaqit qila olmaydi. Bot faqat QO'YADI, hech qachon olmaydi.
     async function depositBottles(block) {
         const work = async () => {
+            // haqiqiy natija oyna YOPILGANDAN keyin shu songa nisbatan o'lchanadi
+            const invBefore = countBottles()
+
             let chest
             try {
                 chest = await bot.openChest(block)
@@ -458,17 +490,20 @@ function createBot() {
                 logger(`Sandiqni ochib bo'lmadi: ${err.message}`)
                 return { deposited: 0, chestFull: false, error: true }
             }
-            await sleep(CONFIG.chestOpenDelayMs)
-
-            let deposited = 0
-            let lastMoved = -1
+            // Serverdan yangi oynaning TO'LIQ kelishini kutamiz (window_items) —
+            // withdrawAllBottles dagi bilan bir xil. 20ms kam edi: slotlar hali
+            // bo'sh ko'rinib, bot bottle topolmay "+0" bilan chiqib ketardi.
+            await sleep(300)
 
             // Har bir pass: oynadagi inventar qismidan bottle stacklarini
             // bir martadan shift-click qilamiz. Pass soni cheklangan —
             // hopper sandiqni bo'shatib tursa ham cheksiz loop bo'lmaydi.
+            // O'lchovlar windowInvCount bilan: countBottles() oyna ochiqligida
+            // yangilanmaydi, shu tufayli oldin pass natijasi doim 0 ko'rinib,
+            // deposit birinchi passdan keyin to'xtab "+0 bottle" deb yozardi.
             for (let pass = 0; pass < 5; pass++) {
                 if (disconnected || needHomeAfterDeath) break
-                const before = countBottles()
+                const before = windowInvCount(chest, 'glass_bottle')
                 if (before === 0) break
                 // 1 stack dan kam joy qolsa "to'la" hisoblanadi
                 if (chestFreeSpaceFor(chest, 'glass_bottle') < CONFIG.chestFullFreeSpace) break
@@ -487,20 +522,21 @@ function createBot() {
                     await bot.waitForTicks(1)
                 }
 
-                // server tasdiqlari kelib bo'lguncha kutamiz — soni barqarorlashsin.
-                // Qat'iy 2 tick yetmasligi mumkin edi (sekin serverda pass natijasi
-                // 0 bo'lib ko'rinib, deposit erta tugab qolardi).
-                await waitForStable(() => countBottles())
-                lastMoved = before - countBottles()
-                if (lastMoved > 0) deposited += lastMoved
-                else break // hech narsa o'tmadi — keyingi urinish attempt loopda
+                // hopper bo'shatgan joyga qolgan stacklar keyingi passda tushadi;
+                // server tuzatishlari oynaga kelib ulgurishi uchun qisqa kutamiz
+                await bot.waitForTicks(4)
+                if (before - windowInvCount(chest, 'glass_bottle') <= 0) break // hech narsa o'tmadi
             }
 
             // To'la FAQAT oynaning haqiqiy holatiga qarab aniqlanadi:
-            // bo'sh joy 1 stackdan kam qolgan bo'lsa — to'la. Shift-click
-            // o'tmay qolishi (desync) endi "to'la" deb YOLG'ON belgilanmaydi.
+            // bo'sh joy 1 stackdan kam qolgan bo'lsa — to'la.
             const chestFull = chestFreeSpaceFor(chest, 'glass_bottle') < CONFIG.chestFullFreeSpace
             await safeClose(chest)
+
+            // Oyna yopilgach server resync paketlari kelib bo'lsin — shundan
+            // KEYINGI countBottles() haqiqiy qiymat (withdraw bilan bir xil usul)
+            await waitForStable(() => countBottles(), 300, CONFIG.withdrawSettleMs)
+            const deposited = Math.max(0, invBefore - countBottles())
             return { deposited, chestFull, error: false }
         }
 
@@ -824,7 +860,21 @@ function createBot() {
                     }
                     unreachableCounts.delete(i) // yetib bordik — hisobni tozalaymiz
 
-                    const { deposited, chestFull } = await depositBottles(block)
+                    const { deposited, chestFull, error } = await depositBottles(block)
+                    if (error) {
+                        // ochish/timeout xatosi — "yetib bo'lmadi" kabi sanaladi:
+                        // limitgacha qayta uriniladi, keyin o'tkazib yuboriladi
+                        // (aks holda bu xato jimgina yutilib, bot maxTripsPerIsland
+                        // gacha bekorga qatnayverardi)
+                        const n = (unreachableCounts.get(i) || 0) + 1
+                        unreachableCounts.set(i, n)
+                        if (n >= CONFIG.chestUnreachableLimit) {
+                            logger(`Sandiq ${n} urinishda ham ochilmadi: ${pos} — o'tkazib yuboramiz!`, 'muhim')
+                            fullChests.add(i)
+                            skippedChests.add(i)
+                        }
+                        continue
+                    }
                     logger(`Chest ${i + 1}/${island.deposit_chests.length}: +${deposited} bottle${chestFull ? ' (TO\'LDI ✔)' : ''}`)
                     if (chestFull) fullChests.add(i)
                     if (deposited > 0 || chestFull) progress = true
@@ -945,7 +995,12 @@ function createBot() {
     })
     bot.on('whisper', async (user, msg) => {
         if (CONFIG.owners.includes(user)) {
-            if (msg === 'drop') return drop()
+            // drop ish paytida taqiqlanadi — trip o'rtasida bottle larni
+            // tashlab yuborib jarayonni buzmasligi uchun
+            if (msg === 'drop') {
+                if (busy) return logger('Bot band — drop bekor qilindi!', 'muhim')
+                return drop()
+            }
             // === Island filler buyruqlari ===
             if (msg === 'fillislands') {
                 await fillAllIslands();
