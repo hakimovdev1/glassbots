@@ -5,6 +5,8 @@ const mineflayer = require('mineflayer')
 const pathfinder = require('mineflayer-pathfinder')
 // homeChestArea, sandiq tartibi, log tizimi — crafter.js bilan YAGONA manbadan (shared.js)
 const { HOME_CHEST_AREA, chestOrder, inHomeChestArea, LOG_LEVELS, shouldLog } = require('./shared')
+// trusted / trust / rmtrust whisper buyruqlari — crafter.js bilan YAGONA manbadan
+const { createTrustCommands } = require('./trustCommands')
 const { Movements } = pathfinder
 const { GoalNear } = pathfinder.goals
 const { Vec3 } = require('vec3')
@@ -161,10 +163,10 @@ const ISLANDS = [
         orol_bot_username: 'KH_BOT_N5',
         endPortal: new Vec3(-4379, 83, -6186),
         deposit_chests: [
-            new Vec3(-4371,95,-6174),
-            new Vec3(-4371,95,-6183),
-            new Vec3(-4371,95,-6194),
-            new Vec3(-4371,95,-6204),
+            new Vec3(-4371, 95, -6174),
+            new Vec3(-4371, 95, -6183),
+            new Vec3(-4371, 95, -6194),
+            new Vec3(-4371, 95, -6204),
         ],
         last_full_deposit_date: null,
     },
@@ -1061,6 +1063,15 @@ function createBot() {
             startLogin()
         }
     })
+    bot.on('chat', async (username, msg) => {
+        if (
+            username == 'hausemaster' &&
+            msg.toLowerCase().includes('serverda')
+        ) {
+            await fillAllIslands()
+            return
+        }
+    })
     bot.on('login', () => {
         logger('Logged in', 'muhim')
     })
@@ -1091,6 +1102,18 @@ function createBot() {
         logger(`Ulanish uzildi (${reason})`, 'muhim')
         scheduleReconnect()
     })
+    // Owner ga javob: konsolga ham, o'yin ichiga whisper bilan ham boradi —
+    // hostingda bot loglarini ochmasdan holatni bilish uchun
+    function reply(user, text) {
+        logger(text, 'muhim')
+        try { bot.chat(`/msg ${user} ${text}`) } catch (e) { /* ignore */ }
+    }
+
+    // trusted / trust <name> / rmtrust <name|*> buyruqlari (trustCommands.js).
+    // busy paytida rad etiladi — trusted oynasi deposit oynalari bilan
+    // to'qnashib desync qilmasligi uchun
+    const trustCommands = createTrustCommands(bot, { reply, isBusy: () => busy })
+
     bot.on('whisper', async (user, msg) => {
         if (CONFIG.owners.includes(user)) {
             // drop ish paytida taqiqlanadi — trip o'rtasida bottle larni
@@ -1156,6 +1179,8 @@ function createBot() {
                 console.log(items);
                 return
             }
+            // === Trusted boshqaruvi: trusted / trust <name> / rmtrust <name|*> ===
+            if (await trustCommands.handle(user, msg)) return
             bot.chat(msg)
             return
         };

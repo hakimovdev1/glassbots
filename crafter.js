@@ -16,6 +16,8 @@ const pathfinder = require('mineflayer-pathfinder')
 const craftEngine = require('mineflayer-craft-engine')
 // homeChestArea, sandiq tartibi, log tizimi — glassFiller.js bilan YAGONA manbadan (shared.js)
 const { HOME_CHEST_AREA, chestOrder, inHomeChestArea, LOG_LEVELS, shouldLog } = require('./shared')
+// trusted / trust / rmtrust whisper buyruqlari — glassFiller.js bilan YAGONA manbadan
+const { createTrustCommands } = require('./trustCommands')
 const { Movements } = pathfinder
 const { GoalBlock, GoalNear } = pathfinder.goals
 const { Vec3 } = require('vec3')
@@ -1364,6 +1366,11 @@ function createBot() {
         try { bot.chat(`/msg ${user} ${text}`) } catch (e) { /* ignore */ }
     }
 
+    // trusted / trust <name> / rmtrust <name|*> buyruqlari (trustCommands.js).
+    // busy paytida rad etiladi — trusted oynasi craft/deposit/shop oynalari
+    // bilan to'qnashib desync qilmasligi uchun
+    const trustCommands = createTrustCommands(bot, { reply, isBusy: () => busy })
+
     bot.on('whisper', async (user, msg) => {
         if (!CONFIG.owners.includes(user)) return
 
@@ -1439,6 +1446,8 @@ function createBot() {
             console.log(items)
             return
         }
+        // === Trusted boshqaruvi: trusted / trust <name> / rmtrust <name|*> ===
+        if (await trustCommands.handle(user, msg)) return
         bot.chat(msg)
     })
 

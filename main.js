@@ -26,7 +26,7 @@ const { LOG_LEVELS } = require('./shared')
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const LOG_DIR = path.join(DATA_DIR, 'logs')
 const STATE_FILE = path.join(DATA_DIR, 'manager.state.json')
-const PORT = Number(process.env.PORT) || 3000
+const PORT = Number(process.env.PORT) || 2009
 // API himoyasi: so'rovlarda x-admin-token header (yoki ?token=) shu bilan
 // bir xil bo'lishi kerak. Bo'sh qoldirilsa himoya O'CHIQ bo'ladi!
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''
@@ -193,7 +193,10 @@ function startBot(name) {
     }
     if (rt.restartTimer) { clearTimeout(rt.restartTimer); rt.restartTimer = null }
 
-    const env = { ...process.env, [def.loggerEnv]: state.bots[name].loggerType }
+    // DATA_DIR bolalarga ham ANIQ uzatiladi — glassFiller.state.json kabi
+    // fayllar ham volume ichiga tushsin (env berilmagan bo'lsa bola o'z
+    // papkasiga yozib, redeploy da state yo'qolardi)
+    const env = { ...process.env, DATA_DIR, [def.loggerEnv]: state.bots[name].loggerType }
     const proc = spawn(process.execPath, [path.join(__dirname, def.script)], {
         cwd: __dirname,
         env,
@@ -227,9 +230,19 @@ function startBot(name) {
             rt.backoffMs = Math.min(rt.backoffMs * 2, CONFIG.restartMaxMs)
             rt.restarts++
             managerLog(name, `${Math.round(delay / 1000)}s dan keyin avtomatik qayta ishga tushadi`)
-            rt.restartTimer = setTimeout(() => {
+            rt.restartTimer = setTimeout(function retry() {
                 rt.restartTimer = null
-                if (state.bots[name].enabled && !rt.proc) startBot(name)
+                if (!state.bots[name].enabled || rt.proc) return
+                const r = startBot(name)
+                if (!r.ok) {
+                    // start o'tmadi (masalan akkaunt to'qnashuvi hali tugamagan) —
+                    // backoff bilan yana urinamiz, aks holda restart zanjiri shu
+                    // yerda uzilib bot "yoqilgan, lekin o'chiq" bo'lib qolardi
+                    const d = rt.backoffMs
+                    rt.backoffMs = Math.min(rt.backoffMs * 2, CONFIG.restartMaxMs)
+                    managerLog(name, `start o'tmadi (${r.error}) — ${Math.round(d / 1000)}s dan keyin yana uriniladi`)
+                    rt.restartTimer = setTimeout(retry, d)
+                }
             }, delay)
         }
     }
@@ -317,6 +330,12 @@ function apiSetLogger(name, loggerType) {
     // bot env ni faqat ishga tushishda o'qiydi — yangi qiymat ishlashi uchun
     // ishlab turgan botni qayta ishga tushiramiz
     if (rt.proc) {
+        // bot baribir to'xtayapti yoki o'chirilgan — o'ldirmaymiz: aks holda
+        // enabled=false bo'lsa exit handler uni qayta ko'tarmas edi va note
+        // yolg'on bo'lardi; yangi qiymat keyingi start da o'zi ishlatiladi
+        if (rt.stopping || !state.bots[name].enabled) {
+            return { ok: true, note: 'loggerType saqlandi, keyingi start da ishlatiladi' }
+        }
         rt.backoffMs = 1000
         killProc(name)
         return { ok: true, note: 'loggerType saqlandi, bot yangi qiymat bilan qayta ishga tushmoqda' }
@@ -345,6 +364,14 @@ function statusOf(name) {
 // ======================= EXPRESS =======================
 const app = express()
 app.use(express.json())
+// Buzilgan JSON body kelsa Express default HTML xatosi o'rniga JSON qaytaramiz —
+// dashboard/curl javobni har doim JSON deb o'qiy oladi
+app.use((err, req, res, next) => {
+    if (err && err.type === 'entity.parse.failed') {
+        return res.status(400).json({ ok: false, error: 'JSON body xato' })
+    }
+    next(err)
+})
 
 // Coolify healthcheck uchun — token talab qilmaydi
 app.get('/health', (req, res) => res.json({ ok: true }))
@@ -394,7 +421,8 @@ app.post('/api/bots/:name/logger', (req, res) => {
     res.status(r.ok ? 200 : 400).json({ ...r, bot: statusOf(req.params.name) })
 })
 app.get('/api/bots/:name/logs', (req, res) => {
-    const n = Math.min(Number(req.query.lines) || 100, CONFIG.maxLogLines)
+    // manfiy/0/notog'ri qiymatlar 1..maxLogLines oralig'iga keltiriladi
+    const n = Math.max(1, Math.min(Number(req.query.lines) || 100, CONFIG.maxLogLines))
     const logs = runtime[req.params.name].logs
     res.json({ ok: true, lines: logs.slice(-n) })
 })
@@ -533,7 +561,7 @@ setInterval(refresh, 3000)
 </html>`
 
 // ======================= ISHGA TUSHIRISH =======================
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`[manager] Bot manager ishga tushdi: http://0.0.0.0:${PORT}`)
     console.log(`[manager] Holat fayli: ${STATE_FILE}`)
     if (!ADMIN_TOKEN) console.log('[manager] OGOHLANTIRISH: ADMIN_TOKEN berilmagan — API himoyasiz!')
@@ -544,6 +572,23 @@ app.listen(PORT, () => {
         setTimeout(() => { if (state.bots[name].enabled && !isRunning(name)) startBot(name) }, i * CONFIG.autoStartStaggerMs)
     })
     if (enabled.length) console.log(`[manager] Avto-start: ${enabled.join(', ')}`)
+})
+
+// Port band (EADDRINUSE) kabi xatolarda tushunarsiz stack o'rniga aniq xabar.
+// Bu holatda ishlashdan ma'no yo'q — chiqamiz, hosting o'zi qayta ko'taradi
+server.on('error', err => {
+    console.log(`[manager] Server ishga tushmadi: ${err.message}`)
+    process.exit(1)
+})
+
+// Kutilmagan xato managerni YIQITMASIN: manager o'lsa bola-jarayonlar egasiz
+// qolib ishlayveradi, keyingi deploy esa xuddi shu akkauntlar bilan yangi
+// nusxalarni ochadi — botlar bir-birini kick qilib cheksiz aylanib qolardi
+process.on('uncaughtException', err => {
+    console.log(`[manager] !!! Uncaught exception: ${err?.stack || err}`)
+})
+process.on('unhandledRejection', err => {
+    console.log(`[manager] !!! Unhandled rejection: ${err?.stack || err}`)
 })
 
 // Coolify redeploy da konteynerga SIGTERM keladi — bolalarni toza o'ldirib
