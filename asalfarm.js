@@ -16,7 +16,9 @@ process.on('unhandledRejection', reason => {
 const fs = require('fs')
 const path = require('path')
 const admins = ['HAKIMOV', 'IveNeS_UZ', 'Zenomus'] // botlarni boshqaruvchilar niklari
-const canLoggerWork = true // log yozib boruvchi ishlashi, true = Ha, false = Yo'q
+// log yozib boruvchi ishlashi — main.js dan ASALFARM_LOGGER_TYPE=logsiz
+// berilsa fayl loglari o'chadi, boshqa hollarda yoqiq
+const canLoggerWork = (process.env.ASALFARM_LOGGER_TYPE || 'barchasi') !== 'logsiz'
 const honeyChestWarp = 'sell' // asalni qaysi warpga borib oladi
 const afkWarp = 'afk' // bot uchun afk warpi
 
@@ -53,6 +55,71 @@ function formatMoney(amount) {
 }
 function getPlayerList() {
   return playerList
+}
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// ======================= JARAYON ICHI BROADCAST =======================
+// Barcha MinecraftBot obyektlari ro'yxati (createAndInitBot to'ldiradi).
+// ESKI USUL: "bind say" buyrug'i botdan-botga whisper zanjiri bo'lib borardi —
+// zanjirda bitta bot offline bo'lsa, undan keyingi botlarning HECH BIRI
+// buyruqni olmay qolardi. Hamma bot BITTA jarayonda ishlagani uchun endi
+// buyruq har bir online botga to'g'ridan-to'g'ri yetkaziladi.
+const allBots = []
+const BROADCAST_STAGGER_MS = 600 // botlar orasidagi pauza (server anti-spami uchun)
+
+// cmdText ni BARCHA online botlarga navbat bilan yuboradi.
+// 'claim' va 'sell' maxsus amal, qolgan hamma narsa chatga yoziladi.
+// Natija: { sent: nechta botga yuborildi, offline: [offline bot nomlari] }
+function broadcastCommand(cmdText) {
+  const online = allBots.filter(mb => mb.status === 'online' && mb.bot)
+  const offline = allBots
+    .filter(mb => !(mb.status === 'online' && mb.bot))
+    .map(mb => mb.botUsername)
+  online.forEach((mb, i) => {
+    setTimeout(() => {
+      // navbati kelguncha bot uzilib qolgan bo'lishi mumkin — tekshiramiz
+      if (mb.status !== 'online' || !mb.bot) return
+      try {
+        if (cmdText === 'claim') withdrawHoney(mb.bot, mb.mcData)
+        else if (cmdText === 'sell') mb.bot.chat('/is shop Food')
+        else mb.bot.chat(cmdText)
+      } catch (e) {
+        saveLog(mb.botUsername, `broadcast xato: ${e.message}`, true)
+      }
+    }, i * BROADCAST_STAGGER_MS)
+  })
+  return { sent: online.length, offline }
+}
+
+// Keyingi kelgan xabarlar ichidan test() ga MOS kelganini kutadi (timeout bilan).
+// Eski koddagi bot.once('messagestr') xato edi: u keyingi BIRINCHI xabarni
+// olardi — oraga boshqa xabar (masalan TPS) kelib qolsa javob yo'qolardi.
+function waitForMessage(bot, test, timeoutMs = 5000) {
+  return new Promise(resolve => {
+    const onMessage = msg => {
+      if (!test(msg)) return
+      cleanup()
+      resolve(msg)
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve(null)
+    }, timeoutMs)
+    function cleanup() {
+      clearTimeout(timer)
+      bot.off('messagestr', onMessage)
+    }
+    bot.on('messagestr', onMessage)
+  })
+}
+
+// Botni berilgan koordinataga pathfinder bilan yuboradi ("bind come" uchun)
+function moveTo(position, bot) {
+  bot.pathfinder.setGoal(
+    new goals.GoalBlock(position.x, position.y, position.z)
+  )
 }
 class MinecraftBot {
   constructor(botUsername, botPassword, serverIP, serverPort) {
@@ -286,61 +353,33 @@ class MinecraftBot {
       } catch (e) { /* uzilish oralig'ida chat throw qilishi mumkin — e'tiborsiz */ }
     }, 25000)
 
-    this.bot.on('chat', async (username, message) => {
+    // Ommaviy chat buyruqlari: "% <buyruq>" — buni HAR BIR bot o'zi ko'rib
+    // o'zi bajaradi (hamma serverda bir xil chatni ko'radi, tarqatish shart emas)
+    this.bot.on('chat', (username, message) => {
       if (
         username == 'hausemaster' &&
         message.toLowerCase().includes('serverda')
       ) {
         withdrawHoney(this.bot, this.mcData)
+        return
       }
-      if (admins.includes(username)) {
-        if (message.startsWith('%')) {
-          let bind = message.split('% ')[1]
-          if (bind == 'claim') {
-            withdrawHoney(this.bot, this.mcData)
-            return
-          }
-          if (bind == 'sell') {
-            let honey = 0
-            await this.bot.inventory.slots.forEach(slot => {
-              if (slot?.name == 'honey_bottle') return (honey += 1)
-            })
-            setTimeout(() => {
-              if (honey == 0) return
-              this.bot.chat('/is shop Food')
-            }, 100)
-            return
-          }
+      if (admins.includes(username) && message.startsWith('% ')) {
+        const cmd = message.slice(2).trim()
+        if (cmd === 'claim') {
+          withdrawHoney(this.bot, this.mcData)
+          return
+        }
+        if (cmd === 'sell') {
+          // sotadigan asal bo'lsagina do'kon ochiladi
+          const hasHoney = this.bot.inventory
+            .items()
+            .some(item => item.name === 'honey_bottle')
+          if (hasHoney) this.bot.chat('/is shop Food')
+          return
         }
       }
     })
 
-    function moveTo(position, bot) {
-      bot.pathfinder.setGoal(
-        new goals.GoalBlock(position.x, position.y, position.z)
-      )
-    }
-    const getExpectedSender = botName => {
-      const order = [
-        'asalFarm_N1',
-        'asalFarm_N2',
-        'asalFarm_N3',
-        'asalFarm_N4',
-        'asalFarm_N5',
-        'asalFarm_N6',
-        'KH_BOT_N1',
-        'KH_BOT_N2',
-        'KH_BOT_N3',
-        'KH_BOT_N4',
-        'KH_BOT_N5',
-        'KH_BOT_N6'
-      ]
-
-      const botIndex = order.indexOf(botName)
-      if (botIndex === -1) return null
-
-      return botIndex === 0 ? 'asalFarm_N6' : order[botIndex - 1]
-    }
     this.bot.on('messagestr', async message => {
       if(message.trim() === '') return
       if (
@@ -412,160 +451,131 @@ class MinecraftBot {
         console.log(`${this.bot.username} Login passed`.green)
       }
 
-      if (message.includes(' -> me] ')) {
-        const botName = this.bot.username
-        const expectedSender = getExpectedSender(botName)
-
-        if (
-          expectedSender &&
-          message.startsWith(`[${expectedSender} -> me] `)
-        ) {
-          let adminStr = message.split(' -> me] ')[1]
-          const nextBot =
-            BOTS_CONFIG[
-              BOTS_CONFIG.findIndex(bot => bot?.username == botName) + 1
-            ]?.username
-          nextBot ? this.bot.chat(`/msg ${nextBot} ${adminStr}`) : null
-          if (adminStr === 'claim') {
-            withdrawHoney(this.bot, this.mcData)
-            return
+      // ======= WHISPER BUYRUQLARI =======
+      // Format: "[YUBORUVCHI -> me] xabar". Faqat adminlardan qabul qilinadi,
+      // buyruqlar ro'yxati va bajarilishi — handleWhisper metodida.
+      // Eski bot->bot whisper zanjiri olib tashlangan: endi "bind say"
+      // broadcastCommand orqali hamma botga jarayon ichida yetkaziladi.
+      const whisper = message.match(/^\[(\S+) -> me\] (.+)$/)
+      if (whisper) {
+        const [, sender, text] = whisper
+        if (admins.includes(sender)) {
+          try {
+            await this.handleWhisper(sender, text.trim())
+          } catch (e) {
+            saveLog(this.botUsername, `whisper buyruqda xato: ${e.stack || e.message}`, true)
           }
-          if (adminStr === 'sell') {
-            this.bot.chat('/is shop Food')
-            return
-          }
-          this.bot.chat(adminStr)
         }
-      }
-      if (admins.some(admin => message.startsWith(`[${admin} -> me] `))) {
-        let Admin = message.split(' -> me] ')[0].split('[')[1].trim()
-        let adminStr = message.split(' -> me] ')
-        if (adminStr[1] == 'Server: Restart...') return
-        if (adminStr[1].trim().startsWith('bind ')) {
-          let bind = adminStr[1].split('bind ')[1]
-          if (bind.startsWith('count ')) {
-            let itemX = bind.split('count ')
-            let selectItem = itemX[1]
-            let itemCount = 0
-            let items = this.bot.inventory
-              .items()
-              .filter(item => item.name == selectItem)
-            for (const item of items) {
-              itemCount += item.count
-            }
-            this.bot.chat(`/msg ${Admin} ${itemCount}`)
-            return
-          }
-          if (bind.startsWith('drop ')) {
-            let itemX = bind.split('drop ')
-            let itemCount = 0
-            let selectItem = itemX[1]
-            if (selectItem == 'all') {
-              this.bot.inventory.items().filter(item => {
-                setTimeout(() => {
-                  this.bot.tossStack(item)
-                  itemCount += item.count
-                }, 200)
-              })
-              return
-            }
-            this.bot.inventory.items().filter(item => {
-              if (item.name == selectItem) {
-                setTimeout(() => {
-                  this.bot.tossStack(item)
-                  itemCount += item.count
-                }, 200)
-              }
-            })
-            this.bot.chat(`/msg ${Admin} ${itemCount}`)
-            return
-          }
-          if (bind.startsWith('say ')) {
-            let msg = bind.split('say ')[1]
-            // zanjirdagi OXIRGI botda keyingi bot yo'q — ?. bo'lmasa shu yerda
-            // TypeError chiqib butun buyruq ishlamay qolardi
-            const nextBot =
-              BOTS_CONFIG[
-                BOTS_CONFIG.findIndex(
-                  bot => bot.username === this.bot.username
-                ) + 1
-              ]?.username
-            if (nextBot) this.bot.chat(`/msg ${nextBot} ${msg}`)
-            if (msg == 'claim') {
-              withdrawHoney(this.bot, this.mcData)
-              this.bot.chat('/bal')
-              this.bot.once('messagestr', msg => {
-                if (msg.includes('Balance: $')) {
-                  if (this.bot.username === 'asalFarm_N1') {
-                    this.bot.chat(`/msg ${Admin} ${msg}`)
-                  }
-                }
-              })
-              return
-            }
-            if (msg == 'sell') {
-              this.bot.chat('/is shop Food')
-              this.bot.chat('/bal')
-              this.bot.once('messagestr', msg => {
-                if (msg.includes('Balance: $')) {
-                  if (this.bot.username === 'asalFarm_N1') {
-                    this.bot.chat(`/msg ${Admin} ${msg}`)
-                  }
-                }
-              })
-              return
-            }
-            this.bot.chat(msg)
-            return
-          }
-          if (bind == 'claim') {
-            withdrawHoney(this.bot, this.mcData)
-            return
-          }
-          if (bind == 'sell') {
-            this.bot.chat('/is shop Food')
-            return
-          }
-          if (bind == 'come') {
-            const player = this.bot.players[Admin]
-            if (!player || !player.entity) {
-              this.bot.chat(`/msg ${Admin} sizni topa olmadim.`)
-              return
-            }
-            const targetPos = player.entity.position
-            moveTo(targetPos, this.bot)
-            return
-          }
-          if (bind == 'sell') {
-            withdrawHoney(this.bot, this.mcData)
-          }
-          if (bind.startsWith('quit ')) {
-            let seconds = bind.split('quit ')[1]
-            this.bot.quit('quit ' + seconds)
-          }
-          if (bind.startsWith('click ')) {
-            const type = bind.split('click ')[1]
-            windowClicks(this.bot, type)
-          }
-          return
-        }
-        if (adminStr[1].trim() === 'balance') {
-          this.bot.chat('/bal')
-
-          this.bot.once('messagestr', msg => {
-            if (msg.includes('Balance: $')) {
-              if (this.bot.username === 'asalFarm_N1') {
-                this.bot.chat(`/msg ${Admin} ${msg}`)
-              }
-            }
-          })
-          return
-        }
-
-        this.bot.chat(adminStr[1])
+        return
       }
     })
   }
+  // ======================= WHISPER BUYRUQLARI =======================
+  // Admin botga shaxsiy xabar yuboradi: /msg <bot_nomi> <buyruq>
+  // Tushuniladigan buyruqlar:
+  //   bind say <xabar>     -> BARCHA online botlar <xabar>ni bajaradi/yozadi
+  //                           ('claim' va 'sell' maxsus amal sifatida);
+  //                           javobda nechta botga yetkazilgani aytiladi
+  //   bind claim           -> shu botning o'zi asalni yig'ib sotadi
+  //   bind sell            -> shu botning o'zi do'konni ochib sotadi
+  //   bind count <item>    -> inventardagi <item> soni bilan javob beradi
+  //   bind drop <item|all> -> itemlarni tashlaydi, nechta tashlaganini aytadi
+  //   bind come            -> admin oldiga keladi
+  //   bind quit <sekund>   -> serverdan chiqib, <sekund>dan keyin qaytadi
+  //   bind click <tur>     -> oynada klik (hozircha: mobspawn)
+  //   balance              -> o'z balansi bilan javob beradi
+  //   boshqa istalgan matn -> shu bot uni chatga yozadi (buyruq bo'lsa bajaradi)
+  async handleWhisper(admin, text) {
+    // ba'zi server xabarlari whisper ko'rinishida kelib qolishi mumkin
+    if (text === 'Server: Restart...') return
+    const reply = m => {
+      try {
+        this.bot.chat(`/msg ${admin} ${m}`)
+      } catch (e) { /* ulanish uzilgan bo'lsa jim qolamiz */ }
+    }
+
+    if (text === 'balance') {
+      this.bot.chat('/bal')
+      // eski kod faqat asalFarm_N1 dan javob qaytarardi — endi so'ralgan
+      // botning o'zi javob beradi
+      const balMsg = await waitForMessage(this.bot, m => m.includes('Balance: $'))
+      reply(balMsg || 'balans javobi kelmadi')
+      return
+    }
+
+    if (!text.startsWith('bind ')) {
+      // maxsus buyruq emas — shu botning o'zi chatga yozadi
+      this.bot.chat(text)
+      return
+    }
+    const bind = text.slice('bind '.length).trim()
+
+    if (bind.startsWith('say ')) {
+      // BARCHA botlarga. slice ishlatiladi (split emas) — xabar ichida
+      // "say" so'zi uchrasa ham buzilmaydi
+      const msg = bind.slice('say '.length).trim()
+      const { sent, offline } = broadcastCommand(msg)
+      reply(`${sent} ta botga yuborildi${offline.length ? `, offline: ${offline.join(', ')}` : ''}`)
+      return
+    }
+    if (bind === 'claim') {
+      withdrawHoney(this.bot, this.mcData)
+      return
+    }
+    if (bind === 'sell') {
+      this.bot.chat('/is shop Food')
+      return
+    }
+    if (bind.startsWith('count ')) {
+      const itemName = bind.slice('count '.length).trim()
+      const total = this.bot.inventory
+        .items()
+        .filter(item => item.name === itemName)
+        .reduce((sum, item) => sum + item.count, 0)
+      reply(`${itemName}: ${total} ta`)
+      return
+    }
+    if (bind.startsWith('drop ')) {
+      const itemName = bind.slice('drop '.length).trim()
+      const items = this.bot.inventory
+        .items()
+        .filter(item => itemName === 'all' || item.name === itemName)
+      let dropped = 0
+      // ketma-ket, har birini kutib tashlaymiz — eski kod hammasini bir
+      // vaqtda tashlar va sonini tashlashdan OLDIN aytib yuborardi (doim 0)
+      for (const item of items) {
+        try {
+          await this.bot.tossStack(item)
+          dropped += item.count
+          await sleep(250)
+        } catch (e) {
+          saveLog(this.botUsername, `drop xato (${item.name}): ${e.message}`, true)
+        }
+      }
+      reply(`${dropped} ta tashlandi`)
+      return
+    }
+    if (bind === 'come') {
+      const player = this.bot.players[admin]
+      if (!player || !player.entity) {
+        reply('sizni topa olmadim.')
+        return
+      }
+      moveTo(player.entity.position, this.bot)
+      return
+    }
+    if (bind.startsWith('quit ')) {
+      const seconds = parseInt(bind.slice('quit '.length), 10) || 60
+      this.bot.quit('quit ' + seconds)
+      return
+    }
+    if (bind.startsWith('click ')) {
+      windowClicks(this.bot, bind.slice('click '.length).trim())
+      return
+    }
+    reply(`tushunarsiz buyruq: bind ${bind}`)
+  }
+
   getStatus() {
     return {
       username: this.botUsername,
@@ -596,7 +606,9 @@ function saveLog(username, log = 'empty!**', isError = false) {
     const [month, day, year] = date.split('/')
     const timestamp = `${day} ${year} at ${time}`
 
-    const basePath = path.join(__dirname, 'logs')
+    // DATA_DIR berilsa (main.js / Coolify volume) loglar o'sha yerga yoziladi —
+    // redeploy da o'chib ketmaydi
+    const basePath = path.join(process.env.DATA_DIR || __dirname, 'logs')
 
     if (isError) {
       // yangi hostingda logs/ hali yaratilmagan bo'ladi — appendFile ENOENT
@@ -866,8 +878,9 @@ async function createAndInitBot(
   serverPort,
   delay = 5
 ) {
-  await new Promise(resolve => setTimeout(resolve, delay * 1000))
+  await sleep(delay * 1000)
   const bot = new MinecraftBot(username, password, serverIP, serverPort)
+  allBots.push(bot) // broadcast ("bind say") shu ro'yxat orqali tarqatiladi
   try {
     bot.init()
   } catch (err) {

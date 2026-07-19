@@ -36,6 +36,10 @@ const CONFIG = {
     chestUnreachableLimit: 3,    // sandiqqa shuncha urinishda yetib bo'lmasa — o'tkazib yuboriladi (cheksiz trip loopdan himoya)
     reconnectDelayMs: 5000,      // uzilganda qayta ulanish kutishi
     resumeDelayMs: 8000,         // qayta ulangach ishni davom ettirishdan oldingi kutish
+    // ---- Barqarorlik (selfwork/hosting) — crafter.js bilan bir xil ----
+    reconnectMaxDelayMs: 120000, // backoff: reconnectDelayMs dan shu qiymatgacha oshadi
+    spawnTimeoutMs: 90000,       // shu vaqt ichida spawn bo'lmasa qayta ulanish
+    zombieTimeoutMs: 60000,      // serverdan paket kelmasa ulanish o'lik deb topiladi
 }
 const botConfig = {
     host: 'hypixel.uz',
@@ -111,10 +115,67 @@ const ISLANDS = [
         ],
         last_full_deposit_date: null,
     },
+    // KH_BOTS
+    {
+        orol_bot_username: 'KH_BOT_N1',
+        endPortal: new Vec3(-5435, 82, -6187),
+        deposit_chests: [
+            new Vec3(-5451, 95, -6182),
+            new Vec3(-5438, 95, -6182),
+            new Vec3(-5429, 95, -6182),
+        ],
+        last_full_deposit_date: null,
+    },
+    {
+        orol_bot_username: 'KH_BOT_N2',
+        // e'tibor: z manfiy — qo'shni KH orollari qatori bilan bir xil chiziqda
+        endPortal: new Vec3(-5285, 82, -6187),
+        deposit_chests: [
+            new Vec3(-5276, 95, -6177),
+            new Vec3(-5276, 95, -6197),
+            new Vec3(-5276, 95, -6207),
+        ],
+        last_full_deposit_date: null,
+    },
+    {
+        orol_bot_username: 'KH_BOT_N3',
+        endPortal: new Vec3(-4681, 82, -6188),
+        deposit_chests: [
+            new Vec3(-4695, 95, -6180),
+            new Vec3(-4679, 95, -6180),
+            new Vec3(-4671, 95, -6180),
+        ],
+        last_full_deposit_date: null,
+    },
+    {
+        orol_bot_username: 'KH_BOT_N4',
+        endPortal: new Vec3(-4530, 82, -6186),
+        deposit_chests: [
+            new Vec3(-4518, 95, -6174),
+            new Vec3(-4518, 95, -6190),
+            new Vec3(-4518, 95, -6207),
+        ],
+        last_full_deposit_date: null,
+    },
+    {
+        orol_bot_username: 'KH_BOT_N5',
+        endPortal: new Vec3(-4379, 83, -6186),
+        deposit_chests: [
+            new Vec3(-4371,95,-6174),
+            new Vec3(-4371,95,-6183),
+            new Vec3(-4371,95,-6194),
+            new Vec3(-4371,95,-6204),
+        ],
+        last_full_deposit_date: null,
+    },
+
 ]
 
-// last_full_deposit_date restart bo'lsa ham yo'qolmasligi uchun faylga saqlaymiz
-const STATE_FILE = path.join(__dirname, 'glassFiller.state.json')
+// last_full_deposit_date restart bo'lsa ham yo'qolmasligi uchun faylga saqlaymiz.
+// DATA_DIR berilsa (main.js / Coolify volume) — o'sha yerga, redeploy da o'chmaydi
+const STATE_DIR = process.env.DATA_DIR || __dirname
+try { fs.mkdirSync(STATE_DIR, { recursive: true }) } catch (e) { /* allaqachon bor */ }
+const STATE_FILE = path.join(STATE_DIR, 'glassFiller.state.json')
 function loadState() {
     try {
         const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
@@ -145,13 +206,18 @@ function logger(msg, level) { if (msg && shouldLog(CONFIG.loggerType, level)) co
 // Ulanish uzilganda ish holati shu yerda saqlanadi (createBot dan tashqarida) —
 // yangi bot ulanib login qilgach ishni AVTOMATIK davom ettiradi
 let resumeFillAfterReconnect = false
+// Ketma-ket muvaffaqiyatsiz ulanishlar soni (backoff uchun); spawnda 0 ga qaytadi
+let reconnectAttempts = 0
 function createBot() {
     const bot = mineflayer.createBot(botConfig)
+    const createdAt = Date.now()
     bot.loadPlugin(pathfinder.pathfinder)
     let busy = false // bir vaqtda faqat bitta katta vazifa ishlashi uchun
     let loginTriggered = false
     let disconnected = false // ulanish o'lganda darhol true bo'ladi
     let needHomeAfterDeath = false // o'limdan keyin orolga qaytish kerakligini bildiradi
+    let hasSpawned = false // birinchi spawn bo'ldimi (spawn-timeout watchdog uchun)
+    let reconnectScheduled = false // qayta ulanish faqat BIR marta rejalashtirilsin
 
     // "Yo'l yaratish" rejimida minora/ko'prik uchun ishlatiladigan bloklar
     const SCAFFOLD_BLOCK_NAMES = ['dirt', 'cobblestone', 'netherrack', 'stone', 'end_stone', 'cobbled_deepslate']
@@ -184,6 +250,8 @@ function createBot() {
     }
 
     bot.once('spawn', () => {
+        hasSpawned = true
+        reconnectAttempts = 0 // muvaffaqiyatli ulandik — backoff qayta boshlanadi
         bot.pathfinder.setMovements(buildMovements(false))
         // murakkab yo'llarda hisoblash erta uzilib "Path was stopped" bermasligi
         // uchun pathfinderga ko'proq o'ylash vaqti beramiz (default 5s)
@@ -957,6 +1025,31 @@ function createBot() {
     }
 
     // ==================================================================
+    // ================= ULANISH WATCHDOG (selfwork) ====================
+    // ==================================================================
+
+    // Serverdan kelgan HAR QANDAY paket faollik hisoblanadi
+    let lastActivity = Date.now()
+    bot._client.on('packet', () => { lastActivity = Date.now() })
+
+    // Ikki holatni ushlaydi: (1) ulanib olib spawn bo'lmay qotib qolish,
+    // (2) "zombi" ulanish — socket ochiq, lekin server hech narsa yubormayapti.
+    // Ikkalasida ham bot.end() chaqiriladi -> 'end' handler qayta ulaydi.
+    // Busiz bot hostingda indamay osilib qolar va qayta ulanmasdi.
+    const watchdogTimer = setInterval(() => {
+        if (disconnected) return
+        if (!hasSpawned && Date.now() - createdAt > CONFIG.spawnTimeoutMs) {
+            logger('Watchdog: spawn bo\'lmadi — ulanish qaytadan boshlanadi', 'muhim')
+            try { bot.end('spawn timeout') } catch (e) { /* ignore */ }
+            return
+        }
+        if (Date.now() - lastActivity > CONFIG.zombieTimeoutMs) {
+            logger('Watchdog: server javob bermayapti (zombi ulanish) — qayta ulanamiz', 'muhim')
+            try { bot.end('zombie timeout') } catch (e) { /* ignore */ }
+        }
+    }, 10000)
+
+    // ==================================================================
     // ======================= EVENT HANDLERLAR =========================
     // ==================================================================
 
@@ -983,15 +1076,20 @@ function createBot() {
     bot.on('error', err => {
         logger(`Socket xato: ${err.message}`, 'muhim')
     })
-    // Uzilib qolsa avtomatik qayta ulanadi; ish holati saqlanadi
+    // Uzilib qolsa avtomatik qayta ulanadi; ish holati saqlanadi.
+    // Qayta ulanish backoff bilan (5s -> 10s -> ... -> reconnectMaxDelayMs) —
+    // server uzoq o'chirilganda ham bot urinaverib, yonishi bilan kiradi.
     bot.on('end', reason => {
         disconnected = true
+        clearInterval(watchdogTimer)
         if (busy) {
             resumeFillAfterReconnect = true
             logger('Ish uzilib qoldi — qayta ulangach AVTOMATIK davom ettiriladi', 'muhim')
         }
-        logger(`Ulanish uzildi (${reason}) — ${CONFIG.reconnectDelayMs / 1000}s dan keyin qayta ulanamiz...`, 'muhim')
-        setTimeout(createBot, CONFIG.reconnectDelayMs)
+        if (reconnectScheduled) return // bitta uzilish uchun faqat bitta reconnect
+        reconnectScheduled = true
+        logger(`Ulanish uzildi (${reason})`, 'muhim')
+        scheduleReconnect()
     })
     bot.on('whisper', async (user, msg) => {
         if (CONFIG.owners.includes(user)) {
@@ -1054,7 +1152,7 @@ function createBot() {
             }
             if (msg.startsWith('check ')) {
                 const args = msg.split(' ')[1];
-                const items = await bot.inventory.items().filter(item => item.name.includes(args));
+                const items = bot.inventory.items().filter(item => item.name.includes(args));
                 console.log(items);
                 return
             }
@@ -1066,5 +1164,41 @@ function createBot() {
     return bot
 }
 
+// ======================================================================
+// ================ SELFWORK: JARAYON DARAJASIDAGI HIMOYA ===============
+// ======================================================================
 
-createBot()
+// Kutilmagan xatolar (event handler ichidagi throw, unutilgan promise
+// rejection va h.k.) jarayonni O'LDIRMAYDI — log qilinadi va bot
+// watchdog/reconnect tizimi orqali o'zini o'zi tiklaydi.
+process.on('uncaughtException', err => {
+    console.log(`!!! Uncaught exception: ${err?.stack || err}`)
+})
+process.on('unhandledRejection', err => {
+    console.log(`!!! Unhandled rejection: ${err?.stack || err}`)
+})
+
+// Qayta ulanish backoff bilan: 5s, 10s, 20s, ... reconnectMaxDelayMs gacha.
+// Muvaffaqiyatli spawn bo'lishi bilan hisoblagich 0 ga qaytadi.
+function scheduleReconnect() {
+    const delay = Math.min(
+        CONFIG.reconnectDelayMs * 2 ** reconnectAttempts,
+        CONFIG.reconnectMaxDelayMs
+    )
+    reconnectAttempts++
+    console.log(`${Math.round(delay / 1000)}s dan keyin qayta ulanamiz (urinish ${reconnectAttempts})...`)
+    setTimeout(startBot, delay)
+}
+
+// createBot ning o'zi xato tashlasa ham (masalan DNS/socket yaratish xatosi)
+// jarayon yiqilmaydi — backoff bilan qayta uriniladi
+function startBot() {
+    try {
+        createBot()
+    } catch (err) {
+        console.log(`Bot yaratishda xato: ${err?.message || err}`)
+        scheduleReconnect()
+    }
+}
+
+startBot()
