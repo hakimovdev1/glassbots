@@ -48,12 +48,12 @@ const botConfig = {
     port: 25565,
     username: process.env.FILLER_USERNAME, // change username
     version: '1.18.2', // change version if needed (1.21.1 , 1.19.4 , 1.20.1)
-    password: process.env.BOT_PASSWORD, // change password
+    password: process.env.FILLER_PASSWORD, // change password
 }
 // Hostingda env unutilsa bot tushunarsiz xato bilan aylanib qolmasligi
 // uchun — darhol aniq xabar bilan chiqamiz
 if (!botConfig.username || !botConfig.password) {
-    console.log('XATO: FILLER_USERNAME va BOT_PASSWORD env o\'zgaruvchilari berilishi shart!')
+    console.log('XATO: FILLER_USERNAME va FILLER_PASSWORD env o\'zgaruvchilari berilishi shart!')
     process.exit(1)
 }
 

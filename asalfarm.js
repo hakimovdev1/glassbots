@@ -24,8 +24,8 @@ const afkWarp = 'afk' // bot uchun afk warpi
 
 // Hostingda env unutilsa botlar "undefined" parol bilan login qilishga
 // urinib bekorga aylanmasin — darhol aniq xabar bilan chiqamiz
-if (!process.env.BOT_PASSWORD) {
-  console.error("XATO: BOT_PASSWORD env o'zgaruvchisi berilishi shart! (.env fayliga BOT_PASSWORD=... yozing)")
+if (!process.env.ASALFARM_PASSWORD) {
+  console.error("XATO: ASALFARM_PASSWORD env o'zgaruvchisi berilishi shart! (.env fayliga ASALFARM_PASSWORD=... yozing)")
   process.exit(1)
 }
 
@@ -35,7 +35,7 @@ const BOTS_CONFIG = [
     .fill()
     .map((_, i) => ({
       username: `asalFarm_N${i + 1}`,
-      password: process.env.BOT_PASSWORD,
+      password: process.env.ASALFARM_PASSWORD,
       host: 'hypixel.uz',
       port: 25565
     })),
@@ -43,7 +43,7 @@ const BOTS_CONFIG = [
     .fill()
     .map((_, i) => ({
       username: `KH_BOT_N${i + 1}`,
-      password: process.env.BOT_PASSWORD.split('_')[0],
+      password: process.env.ASALFARM_PASSWORD.split('_')[0],
       host: 'hypixel.uz',
       port: 25565
     }))
