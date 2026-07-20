@@ -33,7 +33,11 @@ const CONFIG = {
     craftingTableSearchRadius: 32,   // crafting table qidirish radiusi
     chestReachRange: 3,              // sandiqqa shu masofagacha yaqinlashadi
     pathfindTimeoutMs: 30000,        // pathfinding uchun maksimal vaqt
-    chestOpenDelayMs: 20,            // sandiq ochilgandan keyingi kutish
+    // sandiq ochilgandan keyingi kutish — 20ms yetarli emas edi: server
+    // window_items paketini to'liq yubormasdan slotlar bo'sh ko'rinib qolib,
+    // withdraw/deposit "+0" bilan chiqib ketardi (glassFiller.js da xuddi shu
+    // sabab bilan 300ms ga oshirilgan, shu yerga ham bir xil qiymat qo'yildi)
+    chestOpenDelayMs: 300,
     chestCloseDelayMs: 20,           // sandiq yopishdan oldingi kutish
     depositRetries: 3,               // deposit xatosida qayta urinishlar soni
     reconnectDelayMs: 5000,          // uzilganda qayta ulanish kutishi
@@ -302,7 +306,12 @@ function createBot() {
     async function withdrawFromChest(chest, itemName) {
         let withdrawn = 0
         let failStreak = 0
-        while (!aborted()) {
+        // needHomeAfterDeath ham tekshiriladi: o'lim serverda ochiq oynani
+        // majburan yopadi (close_window) — shundan keyin bot.currentWindow
+        // null bo'lib, clickWindow bot.inventory ga tushib ketadi va shu
+        // yerdagi sandiq-nisbiy slot indekslari o'z inventaridagi noto'g'ri
+        // (masalan armor) slotlarga bosilib qoladi
+        while (!aborted() && !needHomeAfterDeath) {
             if (getInventorySpaceFor(itemName) <= 0) break
             // sandiq (container) qismidan itemli birinchi slot
             let slot = null
@@ -356,7 +365,9 @@ function createBot() {
     async function depositToChest(chest, itemName) {
         let deposited = 0
         let failStreak = 0
-        while (!aborted()) {
+        // needHomeAfterDeath ham tekshiriladi — withdrawFromChest dagi bilan
+        // bir xil sabab (o'lim oynani yopadi, klik boshqa oynaga tushib qoladi)
+        while (!aborted() && !needHomeAfterDeath) {
             if (chestFreeSpaceFor(chest, itemName) <= 0) break
             // oynaning inventar qismidan itemli birinchi slot
             let slot = null
@@ -1004,10 +1015,16 @@ function createBot() {
         }
 
         const first = await findFirstChestWithSpace(positions, itemName)
-        if (!first) return 0
 
-        let space = first.space
-        for (let i = first.idx + 1; i < positions.length && space < needed; i++) {
+        // Himoya: birinchi/oxirgi sandiq ikkalasi ham to'la bo'lsa binary
+        // search "hech qayerda joy yo'q" deb qaytaradi — lekin bu taxmin
+        // noto'g'ri chiqishi mumkin (masalan glassFiller o'rtadan olgan bo'lsa,
+        // depositBottlesHome dagi izohga qarang). Shunday holatda 0 qaytarib
+        // craft loop ni bekorga to'xtatish o'rniga, hammasini QAYTADAN
+        // boshidan linear tekshiramiz.
+        let space = first ? first.space : 0
+        const startIdx = first ? first.idx + 1 : 0
+        for (let i = startIdx; i < positions.length && space < needed; i++) {
             if (aborted() || needHomeAfterDeath) break
             const s = await probeChestSpace(positions[i], itemName)
             if (s > 0) space += s

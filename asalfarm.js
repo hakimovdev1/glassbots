@@ -256,7 +256,8 @@ class MinecraftBot {
       }
 
       if (reasonStr.startsWith('quit ')) {
-        const seconds = parseInt(reasonStr.split('quit ')[1]) || 60
+        const parsedSeconds = parseInt(reasonStr.split('quit ')[1], 10)
+        const seconds = Number.isNaN(parsedSeconds) ? 60 : parsedSeconds
         this.scheduleReconnect(seconds * 1000)
         return
       }
@@ -565,12 +566,13 @@ class MinecraftBot {
       return
     }
     if (bind.startsWith('quit ')) {
-      const seconds = parseInt(bind.slice('quit '.length), 10) || 60
+      const parsedSeconds = parseInt(bind.slice('quit '.length), 10)
+      const seconds = Number.isNaN(parsedSeconds) ? 60 : parsedSeconds
       this.bot.quit('quit ' + seconds)
       return
     }
     if (bind.startsWith('click ')) {
-      windowClicks(this.bot, bind.slice('click '.length).trim())
+      await windowClicks(this.bot, bind.slice('click '.length).trim())
       return
     }
     reply(`tushunarsiz buyruq: bind ${bind}`)
@@ -661,8 +663,7 @@ const validPlayers = new Set([
   'KH_BOT_N2',
   'KH_BOT_N3',
   'KH_BOT_N4',
-  'KH_BOT_N5',
-  'KH_BOT_N6'
+  'KH_BOT_N5'
 ])
 
 let receivedPlayers = new Set()

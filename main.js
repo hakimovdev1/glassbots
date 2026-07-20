@@ -83,13 +83,15 @@ function accountConflict(name) {
 fs.mkdirSync(LOG_DIR, { recursive: true })
 
 // ======================= HOLAT (persist) =======================
-// Birinchi ishga tushirishda (state fayl hali yo'q bo'lsa) qaysi botlar
-// yoqiq bo'ladi. filler default O'CHIQ — u crafter bilan BITTA akkauntda
-// (.env da bir xil username), ikkalasi birga ulansa biri kickka uchraydi.
+// Qaysi bot avto-start bo'lishi HAR DOIM shu yerdan, ya'ni .env dan
+// olinadi (CRAFTER_ACTIVE=true / FILLER_ACTIVE=true) — state.json bunga
+// aralashmaydi (pastdagi loadState() ga qarang). asalfarm har doim yoniq.
+// filler odatda O'CHIQ turadi — u crafter bilan BITTA akkauntda (.env da
+// bir xil username), ikkalasi birga ulansa biri kickka uchraydi.
 const DEFAULT_ENABLED = {
-    crafter: Boolean(process.env.CTAFTER_ACTIVE),
-    filler: Boolean(process.env.FILLER_ACTIVE),
-    asalfarm: true
+    crafter: process.env.CRAFTER_ACTIVE === 'true',
+    filler: process.env.FILLER_ACTIVE === 'true',
+    asalfarm: true, // har doim yoniq — .env dan qat'i nazar
 }
 // { bots: { crafter: { enabled: true, loggerType: 'muhim' }, ... } }
 function defaultState() {
@@ -107,10 +109,13 @@ function loadState() {
     try {
         const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
         // faqat ro'yxatda bor botlar olinadi — eski/ortiqcha yozuvlar tashlanadi
+        // DIQQAT: "enabled" (avto-start) state faylidan ENDI o'qilmaydi — u
+        // har doim yuqoridagi DEFAULT_ENABLED (ya'ni .env) dan olinadi. Aks
+        // holda eski deploylardan qolgan qiymat .env dagi yangi sozlamani
+        // abadiy bekor qilaverardi. Faqat loggerType shu faylda saqlanadi.
         for (const name of Object.keys(BOT_DEFS)) {
             const saved = raw && raw.bots && raw.bots[name]
             if (!saved) continue
-            if (typeof saved.enabled === 'boolean') state.bots[name].enabled = saved.enabled
             if (LOG_LEVELS[saved.loggerType] !== undefined) state.bots[name].loggerType = saved.loggerType
         }
     } catch (e) {
