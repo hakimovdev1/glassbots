@@ -86,7 +86,11 @@ fs.mkdirSync(LOG_DIR, { recursive: true })
 // Birinchi ishga tushirishda (state fayl hali yo'q bo'lsa) qaysi botlar
 // yoqiq bo'ladi. filler default O'CHIQ — u crafter bilan BITTA akkauntda
 // (.env da bir xil username), ikkalasi birga ulansa biri kickka uchraydi.
-const DEFAULT_ENABLED = { crafter: true, filler: false, asalfarm: true }
+const DEFAULT_ENABLED = {
+    crafter: Boolean(process.env.CTAFTER_ACTIVE),
+    filler: Boolean(process.env.FILLER_ACTIVE),
+    asalfarm: true
+}
 // { bots: { crafter: { enabled: true, loggerType: 'muhim' }, ... } }
 function defaultState() {
     const bots = {}
