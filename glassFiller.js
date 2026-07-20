@@ -7,6 +7,8 @@ const pathfinder = require('mineflayer-pathfinder')
 const { HOME_CHEST_AREA, chestOrder, inHomeChestArea, LOG_LEVELS, shouldLog } = require('./shared')
 // trusted / trust / rmtrust whisper buyruqlari — crafter.js bilan YAGONA manbadan
 const { createTrustCommands } = require('./trustCommands')
+// hunger past tushsa chap qo'ldagi ovqatni yeydi — crafter.js bilan YAGONA manbadan
+const { createHungerManager } = require('./hungerManager')
 const { Movements } = pathfinder
 const { GoalNear } = pathfinder.goals
 const { Vec3 } = require('vec3')
@@ -214,6 +216,9 @@ function createBot() {
     const bot = mineflayer.createBot(botConfig)
     const createdAt = Date.now()
     bot.loadPlugin(pathfinder.pathfinder)
+    // hunger.maybeEat() FAQAT oyna ochiq bo'lmagan xavfsiz nuqtalarda
+    // chaqiriladi (har bir sandiq ochilishidan OLDIN) — hungerManager.js ga qarang
+    const hunger = createHungerManager(bot, { logger })
     let busy = false // bir vaqtda faqat bitta katta vazifa ishlashi uchun
     let loginTriggered = false
     let disconnected = false // ulanish o'lganda darhol true bo'ladi
@@ -712,6 +717,9 @@ function createBot() {
             if (disconnected) break
             if (getInventorySpaceFor('glass_bottle') <= 0) break
 
+            // oldingi sessiya sandiqni yopgan, bu sessiya hali ochmagan — oyna yopiq
+            await hunger.maybeEat()
+
             const block = bot.blockAt(p)
             if (!block || !block.name.includes('chest')) break
 
@@ -827,6 +835,9 @@ function createBot() {
                 if (getInventorySpaceFor('glass_bottle') <= 0) break
                 visited.add(`${p.x},${p.y},${p.z}`)
 
+                // oldingi sandiq yopilgan, navbatdagisi hali ochilmagan — oyna yopiq
+                await hunger.maybeEat()
+
                 const block = bot.blockAt(p)
                 if (!block || !block.name.includes('chest')) continue
 
@@ -860,6 +871,9 @@ function createBot() {
             // o'limdan keyin avval o'z orolimizga qaytamiz, trip qaytadan boshlanadi
             await recoverAfterDeath()
 
+            // oyna ochiq emas (hozirgina orolga qaytdik) — hunger tekshirish uchun xavfsiz nuqta
+            await hunger.maybeEat()
+
             // 1. Bottle yetarlimi? Kam bo'lsa avval uyda to'ldirib olamiz
             if (countBottles() < CONFIG.minBottlesBeforeTrip) {
                 await restockBottles()
@@ -891,6 +905,10 @@ function createBot() {
                     if (disconnected || needHomeAfterDeath) break
                     if (fullChests.has(i)) continue
                     if (countBottles() === 0) break
+
+                    // oldingi sandiq allaqachon yopilgan, navbatdagisi hali ochilmagan —
+                    // oyna yopiq bo'lgan xavfsiz nuqta
+                    await hunger.maybeEat()
 
                     const pos = island.deposit_chests[i]
                     // ko'p bosqichli urinish: oddiy yo'l -> kengroq radius ->

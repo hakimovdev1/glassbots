@@ -18,6 +18,8 @@ const craftEngine = require('mineflayer-craft-engine')
 const { HOME_CHEST_AREA, chestOrder, inHomeChestArea, LOG_LEVELS, shouldLog } = require('./shared')
 // trusted / trust / rmtrust whisper buyruqlari — glassFiller.js bilan YAGONA manbadan
 const { createTrustCommands } = require('./trustCommands')
+// hunger past tushsa chap qo'ldagi ovqatni yeydi — glassFiller.js bilan YAGONA manbadan
+const { createHungerManager } = require('./hungerManager')
 const { Movements } = pathfinder
 const { GoalBlock, GoalNear } = pathfinder.goals
 const { Vec3 } = require('vec3')
@@ -122,6 +124,9 @@ function createBot() {
     const createdAt = Date.now()
     bot.loadPlugin(pathfinder.pathfinder)
     bot.loadPlugin(craftEngine)
+    // hunger.maybeEat() FAQAT oyna ochiq bo'lmagan xavfsiz nuqtalarda
+    // chaqiriladi (har bir sandiq ochilishidan OLDIN) — hungerManager.js ga qarang
+    const hunger = createHungerManager(bot, { logger })
     let busy = false          // bir vaqtda faqat bitta katta vazifa
     let currentTask = null    // hozir bajarilayotgan vazifa: 'craft' | 'fill' | 'auto'
     let stopRequested = false // craft loop ni to'xtatish uchun
@@ -556,6 +561,7 @@ function createBot() {
         for (const base of chestList) {
             if (aborted() || needHomeAfterDeath) return
             if (countItem(itemName) === 0) return
+            await hunger.maybeEat() // oldingi sandiq yopilgan, navbatdagisi hali ochilmagan
             const pos = itemName === 'sand' ? base : base.offset(0, -1, 0)
             const block = bot.blockAt(pos)
             if (!block || block.name !== 'chest') continue
@@ -572,6 +578,7 @@ function createBot() {
         for (const gc of glassChests) {
             if (aborted() || needHomeAfterDeath) return
             if (countItem('glass') === 0) return
+            await hunger.maybeEat() // oldingi sandiq yopilgan, navbatdagisi hali ochilmagan
 
             if (!lastStand || !lastStand.equals(gc.standPos)) {
                 try {
@@ -646,6 +653,7 @@ function createBot() {
             let totalNeed = 0
             for (let i = 0; i < chestList.length; i++) {
                 if (aborted() || needHomeAfterDeath) return -1
+                await hunger.maybeEat() // oldingi sandiq yopilgan, navbatdagisi hali ochilmagan
                 const pos = chestPos(i)
                 const block = bot.blockAt(pos)
                 if (!block || block.name !== 'chest') {
@@ -881,6 +889,7 @@ function createBot() {
         for (let i = 0; i < glassChests.length; i++) {
             if (aborted() || needHomeAfterDeath) break
             if (getInventorySpaceFor('glass') <= 0) break
+            await hunger.maybeEat() // oldingi sandiq yopilgan, navbatdagisi hali ochilmagan
 
             const gc = glassChests[i]
 
@@ -1101,6 +1110,7 @@ function createBot() {
         for (let i = startIdx; i < endIdx; i++) {
             if (aborted() || needHomeAfterDeath) break
             if (countItem('glass_bottle') === 0) break
+            await hunger.maybeEat() // oldingi sandiq yopilgan, navbatdagisi hali ochilmagan
 
             const p = positions[i]
             const block = bot.blockAt(p)
@@ -1181,6 +1191,9 @@ function createBot() {
 
             // o'limdan keyin avval orolga qaytamiz, keyin ish davom etadi
             await recoverAfterDeath()
+
+            // har sikl boshida hunger tekshiruvi — hech qanday oyna ochiq emas
+            await hunger.maybeEat()
 
             // 1. glass yig'ish
             const got = await gatherGlass()

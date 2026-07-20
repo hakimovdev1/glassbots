@@ -2,5 +2,6 @@ glassFiller.state.json
 node_modules/
 logs
 data/
+zenomus_heartbeat
 package-lock.json
 .env

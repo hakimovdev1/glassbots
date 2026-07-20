@@ -61,36 +61,37 @@ async function sleep(ms) {
 }
 
 // ======================= JARAYON ICHI BROADCAST =======================
-// Barcha MinecraftBot obyektlari ro'yxati (createAndInitBot to'ldiradi).
-// ESKI USUL: "bind say" buyrug'i botdan-botga whisper zanjiri bo'lib borardi —
-// zanjirda bitta bot offline bo'lsa, undan keyingi botlarning HECH BIRI
-// buyruqni olmay qolardi. Hamma bot BITTA jarayonda ishlagani uchun endi
-// buyruq har bir online botga to'g'ridan-to'g'ri yetkaziladi.
+// Barcha MinecraftBot obyektlari ro'yxati (createAndInitBot to'ldiradi,
+// BOTS_CONFIG tartibida: N1, N2, ... — shu tartib zanjir tartibi hisoblanadi).
+// ZANJIR USULI: N1 buyruqni bajarib bo'lgach DARHOL (sleep/setTimeout'siz)
+// navbatdagi botga — N2 ga — uzatadi, N2 bajarib N3 ga uzatadi va h.k.
+// Bitta bot offline bo'lsa shunchaki o'tkazib yuboriladi, zanjir undan
+// keyingi botga davom etadi (eski whisper-zanjiridagi "hammasi to'xtab
+// qoladi" muammosi yo'q). Hammasi BITTA jarayonda, sinxron ishlagani
+// uchun butun zanjir millisekund ichida tugaydi.
 const allBots = []
-const BROADCAST_STAGGER_MS = 600 // botlar orasidagi pauza (server anti-spami uchun)
 
-// cmdText ni BARCHA online botlarga navbat bilan yuboradi.
+// cmdText ni BARCHA online botlarga zanjir tartibida, kutishsiz yuboradi.
 // 'claim' va 'sell' maxsus amal, qolgan hamma narsa chatga yoziladi.
 // Natija: { sent: nechta botga yuborildi, offline: [offline bot nomlari] }
 function broadcastCommand(cmdText) {
-  const online = allBots.filter(mb => mb.status === 'online' && mb.bot)
-  const offline = allBots
-    .filter(mb => !(mb.status === 'online' && mb.bot))
-    .map(mb => mb.botUsername)
-  online.forEach((mb, i) => {
-    setTimeout(() => {
-      // navbati kelguncha bot uzilib qolgan bo'lishi mumkin — tekshiramiz
-      if (mb.status !== 'online' || !mb.bot) return
-      try {
-        if (cmdText === 'claim') withdrawHoney(mb.bot, mb.mcData)
-        else if (cmdText === 'sell') mb.bot.chat('/is shop Food')
-        else mb.bot.chat(cmdText)
-      } catch (e) {
-        saveLog(mb.botUsername, `broadcast xato: ${e.message}`, true)
-      }
-    }, i * BROADCAST_STAGGER_MS)
-  })
-  return { sent: online.length, offline }
+  let sent = 0
+  const offline = []
+  for (const mb of allBots) {
+    if (mb.status !== 'online' || !mb.bot) {
+      offline.push(mb.botUsername)
+      continue
+    }
+    try {
+      if (cmdText === 'claim') withdrawHoney(mb.bot, mb.mcData)
+      else if (cmdText === 'sell') mb.bot.chat('/is shop Food')
+      else mb.bot.chat(cmdText)
+      sent++
+    } catch (e) {
+      saveLog(mb.botUsername, `broadcast xato: ${e.message}`, true)
+    }
+  }
+  return { sent, offline }
 }
 
 // Keyingi kelgan xabarlar ichidan test() ga MOS kelganini kutadi (timeout bilan).
@@ -237,7 +238,7 @@ class MinecraftBot {
     })
 
     this.bot.on('end', reason => {
-    //   console.log(`[${this.botUsername}] END: ${reason}`.red)
+      //   console.log(`[${this.botUsername}] END: ${reason}`.red)
       saveLog(this.botUsername, reason, true)
       this.status = 'disconnected'
       // o'lik bot ustida tps/watchdog intervallar ishlab qolmasin
@@ -382,7 +383,7 @@ class MinecraftBot {
     })
 
     this.bot.on('messagestr', async message => {
-      if(message.trim() === '') return
+      if (message.trim() === '') return
       if (
         message.startsWith('Skyblock » You have successfully sold') ||
         message.includes('seconds to login')

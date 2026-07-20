@@ -62,6 +62,13 @@ const BOT_DEFS = {
         loggerEnv: 'ASALFARM_LOGGER_TYPE',
         title: 'Asal Farm — 11 ta bot (asalFarm_N1-6, KH_BOT_N1-5)',
     },
+    zenomus: {
+        script: 'zenomus.js',
+        loggerEnv: 'ZENOMUS_LOGGER_TYPE', // izoh: zenomus.js hozircha to'g'ridan
+        // console.log ishlatadi — logger dropdown uni o'zgartirmaydi, lekin
+        // barcha loglari manager stdout orqali baribir ushlanadi
+        title: 'Zenomus — 8 ta miner bot (Zenomus_N1-8)',
+    },
 }
 
 // Bir xil Minecraft akkauntini ishlatadigan ikki bot bir vaqtda ulansa,
@@ -92,6 +99,7 @@ const DEFAULT_ENABLED = {
     crafter: process.env.CRAFTER_ACTIVE === 'true',
     filler: process.env.FILLER_ACTIVE === 'true',
     asalfarm: true, // har doim yoniq — .env dan qat'i nazar
+    zenomus: process.env.ZENOMUS_ACTIVE === 'true', // .env da ZENOMUS_ACTIVE=true bo'lsa avto-start
 }
 // { bots: { crafter: { enabled: true, loggerType: 'muhim' }, ... } }
 function defaultState() {
