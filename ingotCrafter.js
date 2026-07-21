@@ -22,6 +22,8 @@ const fs = require('fs')
 const path = require('path')
 // log darajalari — boshqa botlar bilan YAGONA manbadan (shared.js)
 const { shouldLog } = require('./shared')
+// trusted / trust / rmtrust whisper buyruqlari — boshqa botlar bilan YAGONA manbadan
+const { createTrustCommands } = require('./trustCommands')
 
 // VPS da bitta kutilmagan xato yoki ushlanmagan promise butun jarayonni
 // yiqitmasin — bot uzilishi 'end' orqali baribir reconnect qiladi.
@@ -480,13 +482,24 @@ function createBot(username) {
         reconnectMs[username] = CONFIG.reconnectBaseMs
     })
 
-    bot.on('whisper', (user, msg) => {
+    // Owner ga javob: konsolga ham, o'yin ichiga whisper bilan ham boradi —
+    // hostingda bot loglarini ochmasdan holatni bilish uchun
+    function reply(user, text) {
+        log(text, 'muhim')
+        try { bot.chat(`/msg ${user} ${text}`) } catch (e) { /* ignore */ }
+    }
+    // trusted / trust <name> / rmtrust <name|*> buyruqlari (trustCommands.js)
+    const trustCommands = createTrustCommands(bot, { reply })
+
+    bot.on('whisper', async (user, msg) => {
         if (!CONFIG.owners.includes(user)) return
         if (msg === 'buy') return buyGold()
         if (msg === 'craft') return crafting()
         if (msg === 'get') return getScraps()
         if (msg === 'deposit') return deposit()
         if (msg === 'drop') return drop()
+        // === Trusted boshqaruvi: trusted / trust <name> / rmtrust <name|*> ===
+        if (await trustCommands.handle(user, msg)) return
         bot.chat(msg)
     })
 

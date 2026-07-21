@@ -3,6 +3,8 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') })
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
+// trusted / trust / rmtrust whisper buyruqlari — boshqa botlar bilan YAGONA manbadan
+const { createTrustCommands } = require('./trustCommands')
 require('colors').enable()
 
 process.on('uncaughtException', err => {
@@ -182,6 +184,15 @@ class MinecraftBot {
     this.bot = mineflayer.createBot(botArgs)
     this.mcData = require('minecraft-data')(this.bot.version)
     this.status = 'connecting'
+
+    // trusted / trust <name> / rmtrust <name|*> buyruqlari (trustCommands.js) —
+    // har (qayta) ulanishda YANGI bot obyektiga bog'lab qayta yaratiladi
+    this.trustCommands = createTrustCommands(this.bot, {
+      reply: (user, text) => {
+        console.log(`[${this.botUsername}] ${text}`)
+        try { this.bot.chat(`/msg ${user} ${text}`) } catch (e) { /* ignore */ }
+      }
+    })
 
     // ============== ULANISH WATCHDOG (hosting uchun) ==============
     // Ikki holatni ushlaydi:
@@ -504,6 +515,9 @@ class MinecraftBot {
       reply(balMsg || 'balans javobi kelmadi')
       return
     }
+
+    // === Trusted boshqaruvi: trusted / trust <name> / rmtrust <name|*> ===
+    if (await this.trustCommands.handle(admin, text)) return
 
     if (!text.startsWith('bind ')) {
       // maxsus buyruq emas — shu botning o'zi chatga yozadi

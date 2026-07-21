@@ -4,6 +4,8 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const mineflayer = require("mineflayer");
 const { goals: { GoalBlock }, pathfinder, Movements } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
+// trusted / trust / rmtrust whisper buyruqlari — boshqa botlar bilan YAGONA manbadan
+const { createTrustCommands } = require('./trustCommands');
 // Oddiy wait helper
 const wait = (ms) => new Promise((res) => setTimeout(res, ms));
 // Chunk load xatoliklarini yashirish
@@ -203,8 +205,18 @@ class ZenomusBot {
             this.scheduleReconnect();
         });
 
+        // trusted / trust <name> / rmtrust <name|*> buyruqlari (trustCommands.js)
+        const trustCommands = createTrustCommands(this.bot, {
+            reply: (user, text) => {
+                console.log(`[${this.username}] ${text}`);
+                try { this.bot.chat(`/msg ${user} ${text}`); } catch (e) { /* ignore */ }
+            },
+        });
+
         this.bot.on('whisper', async (username, message) => {
             if (username === 'HAKIMOV' || username === 'Zenomus') {
+                // === Trusted boshqaruvi: trusted / trust <name> / rmtrust <name|*> ===
+                if (await trustCommands.handle(username, message.trim())) return;
                 const cmd = message.trim().toLowerCase();
 
                 if (cmd === 'drop') {
