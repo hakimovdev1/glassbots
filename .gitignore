@@ -3,5 +3,6 @@ node_modules/
 logs
 data/
 zenomus_heartbeat
+ingot_heartbeat
 package-lock.json
 .env

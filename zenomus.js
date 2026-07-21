@@ -204,25 +204,25 @@ class ZenomusBot {
         });
 
         this.bot.on('whisper', async (username, message) => {
-    if (username === 'HAKIMOV' || username === 'Zenomus') {
-        const cmd = message.trim().toLowerCase();
+            if (username === 'HAKIMOV' || username === 'Zenomus') {
+                const cmd = message.trim().toLowerCase();
 
-        if (cmd === 'drop') {
-            for (const item of this.bot.inventory.items()) {
-                if (!item.name.includes('pickaxe')) { // pickaxe qoldiradi
-                    await this.bot.tossStack(item);
-                    await new Promise(r => setTimeout(r, 50)); // 0.05s delay
+                if (cmd === 'drop') {
+                    for (const item of this.bot.inventory.items()) {
+                        if (!item.name.includes('pickaxe')) { // pickaxe qoldiradi
+                            await this.bot.tossStack(item);
+                            await new Promise(r => setTimeout(r, 50)); // 0.05s delay
+                        }
+                    }
+                    return; // Drop tugagach, boshqa narsani qilmaydi
                 }
-            }
-            return; // Drop tugagach, boshqa narsani qilmaydi
-        }
 
-        // Drop emas bo'lsa, 1-3s random delay bilan chatga yozadi
-        setTimeout(() => {
-            this.bot.chat(message);
-        }, Math.random() * 2000 + 1000);
-    }
-});
+                // Drop emas bo'lsa, 1-3s random delay bilan chatga yozadi
+                setTimeout(() => {
+                    this.bot.chat(message);
+                }, Math.random() * 2000 + 1000);
+            }
+        });
 
 
         // Miner bot specific chat handlers

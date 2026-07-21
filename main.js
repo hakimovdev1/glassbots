@@ -11,8 +11,9 @@
 //  - Persistent Storage (volume) qo'shing: konteyner ichida /app/data
 //    (yoki DATA_DIR env bilan boshqa yo'l bering) — aks holda har deploy
 //    da manager.state.json, glassFiller.state.json va loglar o'chib ketadi
-//  - Env o'zgaruvchilar (.env git ga kirmaydi!): BOT_PASSWORD,
-//    CRAFTER_USERNAME, FILLER_USERNAME, ADMIN_TOKEN
+//  - Env o'zgaruvchilar (.env git ga kirmaydi!): CRAFTER_USERNAME/PASSWORD,
+//    FILLER_USERNAME/PASSWORD, ZENOMUS_PASSWORD, ASALFARM_PASSWORD,
+//    INGOT_PASSWORD, ADMIN_TOKEN — hammasini Coolify dashboardda ham bering
 // ======================================================================
 'use strict'
 require('dotenv').config({ path: require('path').join(__dirname, '.env') })
@@ -69,6 +70,11 @@ const BOT_DEFS = {
         // barcha loglari manager stdout orqali baribir ushlanadi
         title: 'Zenomus — 8 ta miner bot (Zenomus_N1-8)',
     },
+    ingot: {
+        script: 'ingotCrafter.js',
+        loggerEnv: 'INGOT_LOGGER_TYPE',
+        title: 'Ingot Crafter — netherite ingot/block craft qiladi (Zenomus_A1-2)',
+    },
 }
 
 // Bir xil Minecraft akkauntini ishlatadigan ikki bot bir vaqtda ulansa,
@@ -100,6 +106,7 @@ const DEFAULT_ENABLED = {
     filler: process.env.FILLER_ACTIVE === 'true',
     asalfarm: true, // har doim yoniq — .env dan qat'i nazar
     zenomus: process.env.ZENOMUS_ACTIVE === 'true', // .env da ZENOMUS_ACTIVE=true bo'lsa avto-start
+    ingot: process.env.INGOT_ACTIVE === 'true', // .env da INGOT_ACTIVE=true bo'lsa avto-start
 }
 // { bots: { crafter: { enabled: true, loggerType: 'muhim' }, ... } }
 function defaultState() {
